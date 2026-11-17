@@ -75,6 +75,14 @@ export interface MeetingPageMeetingDisagreements {
   resolution?: string;
 }
 
+export interface MeetingPageMeetingDeadlines {
+  what: string;
+  kind: "limitation" | "filing" | "hearing" | "response" | "follow_up" | "other";
+  when_text?: string;
+  date?: string;
+  owner?: string;
+}
+
 export interface MeetingPageMeeting {
   meeting_id: string;
   subject: string;
@@ -84,6 +92,7 @@ export interface MeetingPageMeeting {
   title?: string;
   summary?: string;
   disagreements?: MeetingPageMeetingDisagreements[];
+  deadlines?: MeetingPageMeetingDeadlines[];
   in_progress?: boolean;
 }
 
@@ -219,6 +228,14 @@ export interface NotesReadyDisagreements {
   resolution?: string;
 }
 
+export interface NotesReadyDeadlines {
+  what: string;
+  kind: "limitation" | "filing" | "hearing" | "response" | "follow_up" | "other";
+  when_text?: string;
+  date?: string;
+  owner?: string;
+}
+
 export interface NotesReady {
   meeting_id: string;
   project_id?: string;
@@ -229,6 +246,7 @@ export interface NotesReady {
   summary?: string;
   meeting_type?: "sprint" | "planning" | "discovery" | "sales" | "induction" | "one_on_one" | "interview" | "other";
   disagreements?: NotesReadyDisagreements[];
+  deadlines?: NotesReadyDeadlines[];
 }
 
 export interface PairHello {

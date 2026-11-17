@@ -23,7 +23,7 @@
       answer: "Answer", sources: "From your meetings", summary: "AI summary",
       decision: "Decision", question: "Open question", pushback: "Pushback", point: "Point",
       decs: "Key decisions", qs: "Open questions", pushes: "Pushbacks", pts: "Points",
-      dis: "Disagreements", kDis: "Disagreement", disSettled: "Settled", disParked: "Parked", disOpen: "Still open",
+      dis: "Disagreements", dl: "Deadlines", dlNote: "From what was said in the meeting. Check every date yourself before relying on it.", dlKind_limitation: "Limitation", dlKind_filing: "Filing", dlKind_hearing: "Hearing", dlKind_response: "Response", dlKind_follow_up: "Follow-up", dlKind_other: "Other", kDis: "Disagreement", disSettled: "Settled", disParked: "Parked", disOpen: "Still open",
       urgent: "Urgent", medium: "Medium", later: "Later / to discuss",
       filter: "Filter by type", all: "All",
       byHalo: "by Halo", byYou: "by you", menuCat: "Change type", menuUrg: "Change urgency",
@@ -118,7 +118,7 @@
       answer: "الإجابة", sources: "من اجتماعاتك", summary: "ملخص",
       decision: "قرار", question: "سؤال مفتوح", pushback: "اعتراض", point: "نقطة",
       decs: "القرارات الرئيسية", qs: "أسئلة مفتوحة", pushes: "اعتراضات", pts: "نقاط",
-      dis: "الخلافات", kDis: "خلاف", disSettled: "تم الحسم", disParked: "مؤجل", disOpen: "ما زال مفتوحا",
+      dis: "الخلافات", dl: "المواعيد النهائية", dlNote: "مما قيل في الاجتماع. تحقق من كل تاريخ بنفسك قبل الاعتماد عليه.", dlKind_limitation: "التقادم", dlKind_filing: "إيداع", dlKind_hearing: "جلسة", dlKind_response: "رد", dlKind_follow_up: "متابعة", dlKind_other: "أخرى", kDis: "خلاف", disSettled: "تم الحسم", disParked: "مؤجل", disOpen: "ما زال مفتوحا",
       urgent: "عاجل", medium: "متوسط", later: "لاحقاً / للنقاش",
       filter: "تصفية حسب النوع", all: "الكل",
       byHalo: "بواسطة Halo", byYou: "بواسطتك", menuCat: "تغيير النوع", menuUrg: "تغيير الأولوية",
@@ -795,6 +795,29 @@
     return section;
   }
 
+  /** Dates and time limits the meeting named (AI): shown as said, never computed from the law. */
+  function deadlinesBoard(app, lang) {
+    var list = app.page.meeting.deadlines || [];
+    if (!list.length || app.cat !== "all") return null;
+    var section = el("section", "board glass dl");
+    var h2 = el("h2");
+    h2.appendChild(document.createTextNode(t(lang, "dl")));
+    section.appendChild(h2);
+    section.appendChild(el("p", "dl-note", t(lang, "dlNote")));
+    var ul = el("ul", "dl-list");
+    list.forEach(function (d) {
+      var li = el("li", "dl-item k-" + d.kind);
+      li.appendChild(el("span", "chip", t(lang, "dlKind_" + d.kind)));
+      li.appendChild(el("b", null, d.what));
+      var when = [d.when_text, d.date].filter(Boolean).join(" · ");
+      if (when) li.appendChild(el("span", "dl-when", when));
+      if (d.owner) li.appendChild(el("span", "dl-owner", d.owner));
+      ul.appendChild(li);
+    });
+    section.appendChild(ul);
+    return section;
+  }
+
   // The Muse Image recap: drawn only when the viewer presses the button (each
   // image is billed), then saved, so it shows at once on every later visit.
   function recapBoard(app, lang) {
@@ -1237,6 +1260,8 @@
       }
       var dis = disagreementsBoard(app, lang);
       if (dis) stage.appendChild(foldable(app, dis, "dis"));
+      var dl = deadlinesBoard(app, lang);
+      if (dl) stage.appendChild(foldable(app, dl, "dl"));
       var facts = factBoard(app, lang);
       if (facts) stage.appendChild(foldable(app, facts, "facts"));
       var coach = coachBoard(app, lang);
@@ -2423,6 +2448,15 @@
         lines.push("");
       });
     });
+    if ((page.meeting.deadlines || []).length) {
+      lines.push("## " + t(lang, "dl"), "*" + t(lang, "dlNote") + "*");
+      page.meeting.deadlines.forEach(function (d) {
+        lines.push("- **" + t(lang, "dlKind_" + d.kind) + ":** " + d.what +
+          ([d.when_text, d.date].filter(Boolean).length ? " (" + [d.when_text, d.date].filter(Boolean).join(" · ") + ")" : "") +
+          (d.owner ? ", " + d.owner : ""));
+      });
+      lines.push("");
+    }
     lines.push("## " + t(lang, "pts"));
     KIND_KEYS.forEach(function (k) {
       var list = page.points.filter(function (p) { return kindKey(p.kind) === k; });

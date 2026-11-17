@@ -622,6 +622,8 @@ class NotesService:
                 page["meeting"][key] = ready[key].strip()
         if ready and isinstance(ready.get("disagreements"), list) and ready["disagreements"]:
             page["meeting"]["disagreements"] = ready["disagreements"]
+        if ready and isinstance(ready.get("deadlines"), list) and ready["deadlines"]:
+            page["meeting"]["deadlines"] = ready["deadlines"]
         if not meeting["ended_at"]:
             page["meeting"]["in_progress"] = True
         if self._recap_path(meeting_id).is_file():

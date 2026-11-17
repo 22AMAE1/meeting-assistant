@@ -177,6 +177,51 @@
           }
         }
       }
+    },
+    "deadlines": {
+      "type": "array",
+      "maxItems": 8,
+      "description": "AI (Notes Builder): deadlines and dates the meeting itself named (filing, hearing, response, follow-up). Never computed from the law; a lawyer must verify each one.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "what",
+          "kind"
+        ],
+        "properties": {
+          "what": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 160
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "limitation",
+              "filing",
+              "hearing",
+              "response",
+              "follow_up",
+              "other"
+            ]
+          },
+          "when_text": {
+            "type": "string",
+            "maxLength": 80,
+            "description": "The date as said in the meeting, e.g. 'by December 5'."
+          },
+          "date": {
+            "type": "string",
+            "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+            "description": "ISO date, only when the meeting date and what was said make it certain."
+          },
+          "owner": {
+            "type": "string",
+            "maxLength": 80
+          }
+        }
+      }
     }
   },
   "required": [
