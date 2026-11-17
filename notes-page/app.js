@@ -102,6 +102,7 @@
       archivedToast: "Archived. It left Needs action.", undo: "Undo",
       typeLabel: "Meeting type", typeByHalo: "sorted by Halo", typeByYou: "set by you",
       typeHalo: "Halo's pick", typePick: "Set a type",
+      privBadge: "Privileged & confidential", privHead: "PRIVILEGED & CONFIDENTIAL: solicitor-client privilege",
       t_sprint: "Sprint", t_planning: "Planning", t_discovery: "Product discovery", t_sales: "Sales",
       t_induction: "Induction", t_one_on_one: "1:1", t_interview: "Interview", t_other: "Other",
       mailSubject: "Action item from \u201C{m}\u201D: {a}",
@@ -196,6 +197,7 @@
       archivedToast: "تمت الأرشفة. خرج من «يحتاج إجراء».", undo: "تراجع",
       typeLabel: "نوع الاجتماع", typeByHalo: "رتّبه Halo", typeByYou: "حدّدته أنت",
       typeHalo: "اختيار Halo", typePick: "حدّد النوع",
+      privBadge: "سرّي ومحمي بالامتياز", privHead: "سرّي ومحمي بامتياز المحامي والعميل",
       t_sprint: "سبرنت", t_planning: "تخطيط", t_discovery: "استكشاف المنتج", t_sales: "مبيعات",
       t_induction: "تهيئة موظف", t_one_on_one: "فردي", t_interview: "مقابلة", t_other: "أخرى",
       mailSubject: "مهمة من \u00AB{m}\u00BB: {a}",
@@ -1247,7 +1249,7 @@
         cols.appendChild(foldable(app, kindColumn(app, k, lang), k));
       });
       stage.appendChild(cols);
-      if (all && !page.meeting.in_progress) stage.appendChild(recapBoard(app, lang));
+      if (all && !page.meeting.in_progress && !app.privileged) stage.appendChild(recapBoard(app, lang));
       if (app.speaking) stage.appendChild(foldable(app, speakingPanel(app.speaking, lang), "speaking"));
     }
     left.appendChild(stage);
@@ -1673,7 +1675,7 @@
       (m.duration ? '<button class="rp-btn" id="replay" type="button">' + esc(t(lang, "replay")) + "</button>" + viewSegHTML(app.homeMode, lang) : "") + "</div>";
     h += '<div class="pmeta">' + stackHTML(m.people, 5, true) + "<span>" + esc(fmtDate(m.t0)) + (m.duration ? " · " + esc(lenText(m.duration, lang)) : "") +
       " · " + m.people.map(esc).join(", ") + "</span></div>";
-    h += '<div class="ptype">' + (it.meeting_type ? '<span class="tchip">' + esc(t(lang, "t_" + it.meeting_type)) + "</span><small>" +
+    h += '<div class="ptype">' + (app.privileged ? '<span class="pchip">' + esc(t(lang, "privBadge")) + "</span>" : "") + (it.meeting_type ? '<span class="tchip">' + esc(t(lang, "t_" + it.meeting_type)) + "</span><small>" +
       esc(t(lang, it.type_by === "you" ? "typeByYou" : "typeByHalo")) + "</small>" : "") +
       '<label><span class="sr">' + esc(t(lang, "typeLabel")) + '</span><select class="mtype-set" data-meeting="' + esc(m.id) + '">' +
       '<option value="">' + esc(t(lang, it.meeting_type && it.type_by !== "you" ? "typeHalo" : "typePick")) + "</option>" +
@@ -2401,8 +2403,9 @@
     app.toastTimer = setTimeout(function () { node.classList.remove("show"); }, undoLabel ? 5000 : 2200);
   }
 
-  function exportMarkdown(page, lang) {
+  function exportMarkdown(page, lang, privileged) {
     var lines = [];
+    if (privileged) lines.push("**" + t(lang, "privHead") + "**", "");
     lines.push("# " + page.meeting.subject);
     lines.push("");
     page.people.forEach(function (person) {
@@ -2568,11 +2571,19 @@
       render(app);
     };
 
+    // Privileged mode (set by the backend); until it answers, or if it can't, assume it is on.
+    app.privileged = true;
+    function loadPrivacy() {
+      return app.fetchJson("/api/privacy").then(function (r) { app.privileged = !r || r.privileged !== false; })
+        .catch(function () { app.privileged = true; });
+    }
+
     // Each view has its own address so browser Back/Forward work (#102).
     app.loadMeetings = function (push) {
       return Promise.all([
         app.fetchJson("/api/meetings"),
-        app.fetchJson("/api/folders").catch(function () { return []; })
+        app.fetchJson("/api/folders").catch(function () { return []; }),
+        loadPrivacy()
       ]).then(function (res) {
         app.folders = res[1] || [];
         if (push) win.history.pushState({ view: "list" }, "", "/notes/");
@@ -2581,7 +2592,8 @@
     };
 
     app.openMeeting = function (id, push) {
-      return app.fetchJson("/api/meetings/" + encodeURIComponent(id)).then(function (page) {
+      return Promise.all([app.fetchJson("/api/meetings/" + encodeURIComponent(id)), loadPrivacy()]).then(function (res) {
+        var page = res[0];
         if (push) win.history.pushState({ meeting: id }, "", "/notes/" + id);
         app.showMeeting(page);
       });
@@ -2860,7 +2872,7 @@
         return;
       }
       if ((b = g("#export"))) {
-        var blob = new Blob([exportMarkdown(app.page, app.lang)], { type: "text/markdown" });
+        var blob = new Blob([exportMarkdown(app.page, app.lang, app.privileged)], { type: "text/markdown" });
         var a = app.doc.createElement("a");
         a.href = URL.createObjectURL(blob);
         a.download = "halo-notes-" + app.page.meeting.meeting_id + ".md";
@@ -2943,7 +2955,7 @@
       if (sel && sel.id === "refPast" && sel.value) {
         app.fetchJson("/api/meetings/" + encodeURIComponent(sel.value)).then(function (p) {
           var past = tidyPage(p);
-          var text = "# " + titleOf(past.meeting) + "\n\n" + (past.meeting.summary || "") + "\n\n" + exportMarkdown(past, app.lang);
+          var text = "# " + titleOf(past.meeting) + "\n\n" + (past.meeting.summary || "") + "\n\n" + exportMarkdown(past, app.lang, app.privileged);
           return setReference(titleOf(past.meeting) + ".md", text);
         }).catch(function () { toast(app, t(app.lang, "refFail")); });
         return;

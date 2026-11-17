@@ -76,7 +76,7 @@ Halo runs on one PC: the person who presses Start. Nothing is hosted, so there i
 ## Privacy
 
 - **What leaves your PC:** the call audio and your mic audio go to Meta's speech-to-text, and the transcript text goes to Muse Spark (at api.meta.ai, or at the Spark Open host you set). That's all.
-- **Web searches:** every spoken point and pushback goes to Muse Spark with its web search tool for the live fact check (decisions, actions and your notes too when you attach reference notes), so that text can reach a search engine. Internal plans and figures are meant to be skipped, but the model decides that. To keep every sentence off the web, add `HALO_FACT_CHECK=0` to `.env`.
+- **Web searches:** every spoken point and pushback goes to Muse Spark with its web search tool for the live fact check (decisions, actions and your notes too when you attach reference notes), so that text can reach a search engine. Internal plans and figures are meant to be skipped, but the model decides that. To keep every sentence off the web, add `HALO_FACT_CHECK=0` to `.env`. **Privileged mode** (on unless you add `HALO_PRIVILEGED=0` to `.env`) does this for you: no fact check, no Muse Image recap, a "Privileged & confidential" label on the home preview, and a privilege line at the top of Markdown exports. Speech-to-text and the notes still go to the models you configured, so check their data terms before real client calls.
 - **What stays on your PC:** recordings, transcripts and notes stay in the `data` folder. Video frames never leave it either; in Halo mode they go only to the SAM worker on your own GPU.
 - **Wiping everything:** delete the `data` folder.
 - **Consent:** tell everyone in the call before you press Start.

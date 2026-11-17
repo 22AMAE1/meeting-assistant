@@ -145,7 +145,10 @@ def create_app(bus: Bus | None = None) -> FastAPI:
     app.state.coach = Coach(app.state.bus, app.state.llm)
     # Claims go to a web search (and to the meeting's reference notes, a file the Notes
     # Service writes under data/references); HALO_FACT_CHECK=0 keeps them off the web.
-    fact_check_on = os.environ.get("HALO_FACT_CHECK") != "0"
+    # Privileged mode (default on; HALO_PRIVILEGED=0 turns it off) also keeps claims off the web
+    # and meeting content away from the image model.
+    privileged = os.environ.get("HALO_PRIVILEGED") != "0"
+    fact_check_on = os.environ.get("HALO_FACT_CHECK") != "0" and not privileged
     app.state.fact_check = FactCheck(app.state.bus, app.state.llm, data_dir=_data_dir()) if fact_check_on else None
     # Notes Builder: meeting.ended in, one validated notes.ready out.
     # The store file is the Event Store's own; this lane only ever reads it.
@@ -153,7 +156,7 @@ def create_app(bus: Bus | None = None) -> FastAPI:
         app.state.bus, app.state.llm, db_path=_data_dir() / "events.sqlite")
     # Notes service: stateless HTTP reads over the store file + notes-page
     # shell; no background loop, so nothing joins the lifespan.
-    app.state.notes_service = NotesService(app.state.bus, data_dir=_data_dir(), llm=app.state.llm)
+    app.state.notes_service = NotesService(app.state.bus, data_dir=_data_dir(), llm=app.state.llm, privileged=privileged)
     app.include_router(notes_router)
     # Recorder: rec queue drain loop; files + index under the data dir.
     app.state.recorder = Recorder(app.state.bus, data_dir=_data_dir(),
