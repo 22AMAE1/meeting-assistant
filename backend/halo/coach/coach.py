@@ -34,7 +34,7 @@ MAX_WORDS = 2000  # newest words only; shorter input, faster call
 COACH_TIMEOUT_S = 8.0  # live 2026-11-04: 14 coach timeouts at 4 s, each demoting live points for 30 s
 ALERT_GAP_S = 180.0  # live 2026-11-04: at most one alert per 3 minutes
 MAX_SAID = 12  # earlier tips kept in the prompt so they are not reworded (live 2026-11-04)
-PROMPT_CACHE_KEY = "coach-v4"
+PROMPT_CACHE_KEY = "coach-v5"
 
 TIPS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -106,6 +106,34 @@ REHEARSAL = ("The viewer is alone in the call, rehearsing or testing: names are 
              "turn their sentence into an order. Each kind of tip (main point first, "
              "cut filler, keep a line) at most once per meeting. Most moments need "
              "no tip: return empty tips unless one would change what they say next.")
+
+
+# Legal sessions (the Setup panel's Session type). The tips are for the viewer's own side, from the
+# words in the transcript only; a model can be wrong about the law, so it only ever says "consider".
+LEGAL_COMMON = (
+    "LEGAL SESSION: this is a legal proceeding, not a business meeting; ignore the product-manager and "
+    "sales rules above and the viewer's Setup role is counsel unless it says otherwise. Coach only the "
+    "viewer's own side, in plain words, never say an objection or a rule is valid or invalid (say "
+    "'consider'), never name a statute or case, and never invent a name, date, number or exhibit nobody "
+    "said. "
+)
+LEGAL_HEARING = (
+    "LEGAL SESSION: HEARING. Tips: a witness or party says something that conflicts with an earlier "
+    "statement in this transcript (name both, quote the earlier one briefly); a question that looks "
+    "leading, a hearsay answer or an opinion from a lay witness: consider objecting; a claim that "
+    "needs a document or exhibit; a point worth putting to the witness; an answer that dodged the "
+    "question; a date, amount or name stated that the viewer should note. Alert only for a clear moment "
+    "to act now, with the exact words as alert_quote."
+)
+LEGAL_MEDIATION = (
+    "LEGAL SESSION: MEDIATION. Tips: each offer or counter-offer with who made it and the number, and "
+    "the gap between the two latest; a position and the interest that may sit behind it, and one open "
+    "question to uncover it; signs of escalation or anchoring; a term that sounds agreed: confirm it in "
+    "writing with an owner and a date before the session ends; a non-money term nobody has raised. "
+    "Alert only when a party moves, a deal seems close or the room is escalating, with the exact words "
+    "as alert_quote."
+)
+LEGAL_BLOCKS = {"hearing": LEGAL_HEARING, "mediation": LEGAL_MEDIATION}
 
 
 def _norm(text: str) -> str:
@@ -304,7 +332,10 @@ class Coach:
                   f"Viewer language: {context.get('viewer_lang', 'en')}")]
         if context.get("agenda"):
             lines.append("Agenda: " + "; ".join(str(a) for a in context["agenda"]))
-        if not self._others_here(meetingid):
+        legal = LEGAL_BLOCKS.get(str(context.get("session_type") or ""))
+        if legal:
+            lines.append(LEGAL_COMMON + legal)
+        elif not self._others_here(meetingid):
             lines.append(REHEARSAL)
         if roles:
             lines.append("Roles: " + ", ".join(

@@ -18,6 +18,7 @@ const baseForm: SetupForm = {
   ],
   viewerLang: "en",
   projectId: "halo-q4",
+  sessionType: "general",
 };
 
 describe("parseAgenda", () => {
@@ -53,6 +54,12 @@ describe("buildMeetingContext", () => {
   it("omits project_id when the project field is blank", () => {
     const ctx = buildMeetingContext({ ...baseForm, projectId: "   " });
     expect(ctx).not.toHaveProperty("project_id");
+  });
+
+  it("sends the session type only for a hearing or a mediation", () => {
+    expect(buildMeetingContext(baseForm)).not.toHaveProperty("session_type");
+    expect(buildMeetingContext({ ...baseForm, sessionType: "hearing" }).session_type).toBe("hearing");
+    expect(buildMeetingContext({ ...baseForm, sessionType: "mediation" }).session_type).toBe("mediation");
   });
 
   it("accepts the Arabic viewer language", () => {

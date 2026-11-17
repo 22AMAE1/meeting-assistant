@@ -13,6 +13,8 @@ export interface SetupForm {
   rows: RoleRow[];
   viewerLang: "en" | "ar";
   projectId: string;
+  /** Hearing or mediation switches the live coach to legal coaching. */
+  sessionType: "general" | "hearing" | "mediation";
 }
 
 /** Split the agenda textarea into items: one per line, trimmed, empties dropped. */
@@ -41,6 +43,9 @@ export function buildMeetingContext(form: SetupForm): MeetingContext {
     roles,
     viewer_lang: form.viewerLang,
   };
+  if (form.sessionType !== "general") {
+    context.session_type = form.sessionType;
+  }
   const projectId = form.projectId.trim();
   if (projectId.length > 0) {
     context.project_id = projectId;

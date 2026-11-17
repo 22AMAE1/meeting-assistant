@@ -357,6 +357,22 @@ describe("popup sections and automatic pairing (Karim 2026-11-04)", () => {
     expect(root.querySelector("#meeting-form")?.classList.contains("folded")).toBe(false);
   });
 
+  it("a session type change saves and sends the meeting context on its own", async () => {
+    const deps = depsWith();
+    await deps.storage.saveToken("tok-abc");
+    await deps.storage.saveContext(golden);
+    const root = document.createElement("div");
+    document.body.appendChild(root);
+    await initPopup(root, deps);
+    const type = root.querySelector("#session-type") as HTMLSelectElement;
+    expect(type.value).toBe("general");
+    type.value = "mediation";
+    type.dispatchEvent(new Event("change"));
+    await flush();
+    expect(deps.posted.at(-1)?.data.session_type).toBe("mediation");
+    expect((await deps.storage.load()).context?.session_type).toBe("mediation");
+  });
+
   it("a points-language change saves and sends the meeting context on its own", async () => {
     const deps = depsWith();
     await deps.storage.saveToken("tok-abc");

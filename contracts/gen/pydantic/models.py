@@ -222,6 +222,7 @@ class MeetingContext(BaseModel):
     agenda: list[str]
     roles: list[MeetingContextRoles]
     viewer_lang: Literal["en", "ar"]
+    session_type: Literal["general", "hearing", "mediation"] | None = None
     project_id: str | None = None
 
 class MeetingEnded(BaseModel):

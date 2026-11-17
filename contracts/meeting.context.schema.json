@@ -38,6 +38,15 @@
         "ar"
       ]
     },
+    "session_type": {
+      "type": "string",
+      "enum": [
+        "general",
+        "hearing",
+        "mediation"
+      ],
+      "description": "Optional. hearing or mediation switches the live coach to legal coaching; absent or general is the usual coach."
+    },
     "project_id": {
       "type": "string"
     }
