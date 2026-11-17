@@ -47,7 +47,15 @@ const postedTags = [];
 const folders = { list: [], byMeeting: {} };
 const status = { meta_key: true };
 const audio = { status: 404, hits: 0 };
-const home = { archived: false, type: null, typeBy: null, urgent: 1, posts: [] };
+const INTAKE = {
+  practice_area: "employment", client_story: "Dismissed after six years and offered two weeks pay.",
+  issues: [{ issue: "Dismissal without cause", basis: "Wrongful dismissal: reasonable notice at common law", strength: "moderate",
+    facts_for: ["Six years of service"], gaps: ["Was there a signed contract?"] }],
+  missing_facts: ["Age and salary"], time_limits: ["Check the general limitation period"],
+  assessment: { rating: "possibly_viable", reasoning: "Likely entitled to more than two weeks; contract unknown." },
+  next_steps: ["Collect the termination letter"],
+};
+const home = { intake: null, intakePosts: 0, archived: false, type: null, typeBy: null, urgent: 1, posts: [] };
 
 function send(res, status, body, type) {
   res.writeHead(status, { "Content-Type": type || "application/json" });
@@ -65,6 +73,12 @@ test.beforeAll(async () => {
     if (req.method === "GET" && url.pathname === "/api/status") {
       send(res, 200, JSON.stringify(status));
       return;
+    }
+    if (url.pathname === "/api/meetings/" + MEETING_ID + "/intake") {
+      if (req.method === "GET") return send(res, home.intake ? 200 : 404, JSON.stringify(home.intake || { detail: "no" }));
+      home.intakePosts += 1;
+      home.intake = INTAKE;
+      return send(res, 200, JSON.stringify(INTAKE));
     }
     if (req.method === "GET" && url.pathname === "/api/meetings") {
       return send(res, 200, JSON.stringify([
@@ -186,7 +200,7 @@ test.beforeEach(async ({ page }) => {
   status.meta_key = true;
   audio.status = 404;
   audio.hits = 0;
-  Object.assign(home, { archived: false, deleted: false, type: null, typeBy: null, urgent: 1, posts: [] });
+  Object.assign(home, { intake: null, intakePosts: 0, archived: false, deleted: false, type: null, typeBy: null, urgent: 1, posts: [] });
   folders.list.length = 0;
   for (const k of Object.keys(folders.byMeeting)) delete folders.byMeeting[k];
 });
@@ -446,6 +460,23 @@ test("(H2) archive a meeting, then undo it", async ({ page }) => {
   await page.locator("#toast .toast-undo").click();
   await expect(page.locator("#list .row .arch-tag")).toHaveCount(0);
   expect(home.posts.at(-1).body.archived).toBe(false);
+});
+
+test("(H6) a lawyer evaluates a call as a client intake once, with a draft warning", async ({ page }) => {
+  await page.goto(baseURL + "/?meeting=" + MEETING_ID);
+  await expect(page.locator(".board.intake")).not.toContainText("Dismissal without cause");
+  await page.locator("#intakebtn").click();
+  const board = page.locator(".board.intake");
+  await expect(board).toContainText("Dismissal without cause");
+  await expect(board).toContainText("Wrongful dismissal: reasonable notice at common law");
+  await expect(board).toContainText("Possibly viable");
+  await expect(board).toContainText("not legal advice");
+  await expect(board).toContainText("Time limits to check (not calculated)");
+  await expect(page.locator("#intakebtn")).toHaveCount(0);
+  expect(home.intakePosts).toBe(1);
+  await page.reload();
+  await expect(page.locator(".board.intake")).toContainText("Dismissal without cause"); // kept: no second post
+  expect(home.intakePosts).toBe(1);
 });
 
 test("(H3) Halo sorts meetings by type; the user can set their own", async ({ page }) => {

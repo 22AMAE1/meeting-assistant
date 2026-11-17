@@ -102,6 +102,13 @@
       archivedToast: "Archived. It left Needs action.", undo: "Undo",
       typeLabel: "Meeting type", typeByHalo: "sorted by Halo", typeByYou: "set by you",
       typeHalo: "Halo's pick", typePick: "Set a type",
+      intakeBtn: "Evaluate as client intake", intakeBusy: "Evaluating the call, about 20 s…", intakeFail: "The evaluation could not be made. Try again.",
+      intakeT: "Intake evaluation", intakeNote: "A draft for a lawyer to review. It is not legal advice and it can be wrong or incomplete: check every point and every time limit yourself.",
+      intakeStory: "What the client said", intakeIssues: "Possible issues and bases", intakeFor: "Supporting facts", intakeGaps: "Still needed",
+      intakeMissing: "Questions to ask the client", intakeLimits: "Time limits to check (not calculated)", intakeSteps: "Next steps", intakeView: "Preliminary view",
+      intakeRate_likely_viable: "Likely viable", intakeRate_possibly_viable: "Possibly viable", intakeRate_unlikely: "Unlikely", intakeRate_needs_more_info: "Needs more information",
+      intakeStr_strong: "Strong", intakeStr_moderate: "Moderate", intakeStr_weak: "Weak", intakeStr_unclear: "Unclear",
+      intakeArea_employment: "Employment", intakeArea_human_rights: "Human rights", intakeArea_education: "Education", intakeArea_immigration: "Immigration", intakeArea_other: "Other",
       t_sprint: "Sprint", t_planning: "Planning", t_discovery: "Product discovery", t_sales: "Sales",
       t_induction: "Induction", t_one_on_one: "1:1", t_interview: "Interview", t_other: "Other",
       mailSubject: "Action item from \u201C{m}\u201D: {a}",
@@ -196,6 +203,13 @@
       archivedToast: "تمت الأرشفة. خرج من «يحتاج إجراء».", undo: "تراجع",
       typeLabel: "نوع الاجتماع", typeByHalo: "رتّبه Halo", typeByYou: "حدّدته أنت",
       typeHalo: "اختيار Halo", typePick: "حدّد النوع",
+      intakeBtn: "تقييم كمقابلة عميل", intakeBusy: "جارٍ تقييم المكالمة، نحو 20 ثانية…", intakeFail: "تعذّر إجراء التقييم. حاول مرة أخرى.",
+      intakeT: "تقييم المقابلة", intakeNote: "مسودة يراجعها محامٍ. ليست استشارة قانونية وقد تكون خاطئة أو ناقصة: تحقق بنفسك من كل نقطة وكل مدة نظامية.",
+      intakeStory: "ما قاله العميل", intakeIssues: "المسائل والأسس المحتملة", intakeFor: "وقائع داعمة", intakeGaps: "ما زال مطلوبا",
+      intakeMissing: "أسئلة للعميل", intakeLimits: "مدد نظامية للتحقق منها (غير محسوبة)", intakeSteps: "الخطوات التالية", intakeView: "تقدير أولي",
+      intakeRate_likely_viable: "مرجّح", intakeRate_possibly_viable: "ممكن", intakeRate_unlikely: "غير مرجّح", intakeRate_needs_more_info: "يحتاج معلومات أكثر",
+      intakeStr_strong: "قوي", intakeStr_moderate: "متوسط", intakeStr_weak: "ضعيف", intakeStr_unclear: "غير واضح",
+      intakeArea_employment: "العمل", intakeArea_human_rights: "حقوق الإنسان", intakeArea_education: "التعليم", intakeArea_immigration: "الهجرة", intakeArea_other: "أخرى",
       t_sprint: "سبرنت", t_planning: "تخطيط", t_discovery: "استكشاف المنتج", t_sales: "مبيعات",
       t_induction: "تهيئة موظف", t_one_on_one: "فردي", t_interview: "مقابلة", t_other: "أخرى",
       mailSubject: "مهمة من \u00AB{m}\u00BB: {a}",
@@ -817,6 +831,74 @@
     return section;
   }
 
+  /** The client-intake evaluation (AI): issues, possible bases, gaps, time limits to check. A draft for a lawyer. */
+  function intakeBoard(app, lang) {
+    var id = app.page.meeting.meeting_id;
+    var ev = app.intake;
+    if (!ev && (app.page.meeting.in_progress || app.cat !== "all")) return null;
+    var section = el("section", "board glass intake");
+    if (!ev) {
+      var busy = app.intakeBusy === id;
+      var btn = el("button", "btn glass", t(lang, busy ? "intakeBusy" : "intakeBtn"));
+      btn.id = "intakebtn";
+      btn.type = "button";
+      btn.disabled = busy;
+      section.appendChild(btn);
+      if (app.intakeFailed === id) section.appendChild(el("p", "fact-sub", t(lang, "intakeFail")));
+      return section;
+    }
+    if (app.cat !== "all") return null;
+    var h2 = el("h2", null, t(lang, "intakeT"));
+    h2.appendChild(el("span", "chip", t(lang, "intakeArea_" + ev.practice_area)));
+    section.appendChild(h2);
+    section.appendChild(el("p", "intake-note", t(lang, "intakeNote")));
+    var list = function (title, items) {
+      if (!items || !items.length) return;
+      section.appendChild(el("h3", null, t(lang, title)));
+      var ul = el("ul", "intake-list");
+      items.forEach(function (x) { var li = el("li", null, x); li.dir = "auto"; ul.appendChild(li); });
+      section.appendChild(ul);
+    };
+    var view = el("div", "intake-view r-" + ev.assessment.rating);
+    view.appendChild(el("b", null, t(lang, "intakeView") + ": "));
+    view.appendChild(el("span", "chip", t(lang, "intakeRate_" + ev.assessment.rating)));
+    var why = el("p", null, ev.assessment.reasoning);
+    why.dir = "auto";
+    view.appendChild(why);
+    section.appendChild(view);
+    if (ev.client_story) {
+      section.appendChild(el("h3", null, t(lang, "intakeStory")));
+      var story = el("p", null, ev.client_story);
+      story.dir = "auto";
+      section.appendChild(story);
+    }
+    if (ev.issues.length) section.appendChild(el("h3", null, t(lang, "intakeIssues")));
+    ev.issues.forEach(function (i) {
+      var box = el("div", "intake-issue s-" + i.strength);
+      var head = el("div", "dis-head");
+      var title = el("h4", null, i.issue);
+      title.dir = "auto";
+      head.appendChild(title);
+      head.appendChild(el("span", "chip", t(lang, "intakeStr_" + i.strength)));
+      box.appendChild(head);
+      var basis = el("p", "intake-basis", i.basis);
+      basis.dir = "auto";
+      box.appendChild(basis);
+      [["intakeFor", i.facts_for], ["intakeGaps", i.gaps]].forEach(function (g) {
+        if (!g[1].length) return;
+        box.appendChild(el("small", null, t(lang, g[0])));
+        var ul = el("ul", "intake-list");
+        g[1].forEach(function (x) { var li = el("li", null, x); li.dir = "auto"; ul.appendChild(li); });
+        box.appendChild(ul);
+      });
+      section.appendChild(box);
+    });
+    list("intakeMissing", ev.missing_facts);
+    list("intakeLimits", ev.time_limits);
+    list("intakeSteps", ev.next_steps);
+    return section;
+  }
+
   function coachBoard(app, lang) {
     var list = app.page.coaching || [];
     if (!list.length || app.cat !== "all") return null;
@@ -1230,6 +1312,8 @@
       var cmp = compareBoard(app, lang);
       if (cmp) stage.appendChild(foldable(app, cmp, "cmp"));
       stage.appendChild(foldable(app, summaryBoard(app, lang), "actions"));
+      var intake = intakeBoard(app, lang);
+      if (intake) stage.appendChild(foldable(app, intake, "intake"));
       if (all) {
         var dq = el("div", "cols dq");
         ["decision", "question"].forEach(function (k) { dq.appendChild(foldable(app, kindColumn(app, k, lang), k)); });
@@ -2553,8 +2637,12 @@
       app.lineIndex = 0;
       app.speaking = null;
       app.reference = null;
+      app.intake = null;
       render(app);
       var id = page.meeting.meeting_id;
+      app.fetchJson("/api/meetings/" + encodeURIComponent(id) + "/intake").then(function (ev) {
+        if (ev && app.page && app.page.meeting.meeting_id === id) { app.intake = ev; render(app); }
+      }).catch(function () {});
       app.fetchJson("/api/meetings/" + encodeURIComponent(id) + "/reference").then(function (r) {
         if (r && app.page && app.page.meeting.meeting_id === id) { app.reference = r; render(app); }
       }).catch(function () {});
@@ -2856,6 +2944,23 @@
         }).then(function () {
           app.recapBusy = null;
           if (onThisMeeting()) render(app);
+        });
+        return;
+      }
+      if ((b = g("#intakebtn"))) {
+        // About 20 s, and the viewer may open another meeting meanwhile.
+        var intakeId = app.page.meeting.meeting_id;
+        var onIntake = function () { return app.page && app.page.meeting.meeting_id === intakeId; };
+        app.intakeBusy = intakeId;
+        app.intakeFailed = null;
+        render(app);
+        postJson("/api/meetings/" + encodeURIComponent(intakeId) + "/intake", {}).then(function (ev) {
+          if (onIntake()) app.intake = ev;
+        }).catch(function () {
+          app.intakeFailed = intakeId;
+        }).then(function () {
+          app.intakeBusy = null;
+          if (onIntake()) render(app);
         });
         return;
       }

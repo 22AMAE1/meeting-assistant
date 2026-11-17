@@ -31,6 +31,7 @@ from pydantic import ValidationError
 import contracts
 from contracts.gen.pydantic.models import MeetingPage
 from halo.notes_service import ask as ask_mod
+from halo.notes_service import intake as intake_mod
 from halo.notes_service.speaking import speaking_insights
 
 log = logging.getLogger("halo.notes_service")
@@ -182,6 +183,7 @@ class NotesService:
         # ponytail: one image at a time for the whole app; each costs money and
         # nobody needs two at once, so no per-meeting locks.
         self._recap_lock = threading.Lock()
+        self._intake_lock = threading.Lock()
         self._data_dir = Path(data_dir) if data_dir is not None else Path(
             os.environ.get("HALO_DATA_DIR") or "data")
         self._db_path = self._data_dir / "events.sqlite"
@@ -522,6 +524,41 @@ class NotesService:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(image)
         return path
+
+    def _intake_path(self, meeting_id: str) -> Path:
+        return self._data_dir / "intakes" / f"{meeting_id}.json"
+
+    def intake_for(self, meeting_id: str) -> dict[str, Any] | None:
+        """The saved intake evaluation, or None."""
+        try:
+            data = json.loads(self._intake_path(meeting_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) and self.page_for(meeting_id) is not None else None
+
+    def make_intake(self, meeting_id: str) -> dict[str, Any] | None:
+        """Evaluate this meeting as a client intake once; later presses reuse the saved one."""
+        page = self.page_for(meeting_id)
+        complete = getattr(self._llm, "complete_json", None)
+        if page is None or complete is None:
+            return None
+        with self._intake_lock:  # a second tab or a reload must not pay twice
+            saved = self.intake_for(meeting_id)
+            if saved is not None:
+                return saved
+            try:
+                r = complete(prompt=intake_mod.prompt_for(page), schema=intake_mod.SCHEMA,
+                             schema_name="intake.evaluation", timeout_s=60)
+            except Exception:
+                log.exception("intake evaluation failed")
+                return None
+            evaluation = intake_mod.clean(r.data) if r.ok else None
+            if evaluation is None:
+                return None
+            path = self._intake_path(meeting_id)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(evaluation, ensure_ascii=False, indent=1), encoding="utf-8")
+            return evaluation
 
     def _mind_map(self, page: dict[str, Any]) -> dict[str, Any] | None:
         """One cheap text call shapes the map in the meeting's language; a failure draws the page's own lines."""
@@ -1094,6 +1131,31 @@ async def api_make_recap(meeting_id: str, request: Request):  # type: ignore[no-
     if path is None:
         return JSONResponse({"detail": "the image could not be drawn"}, status_code=502)
     return JSONResponse({"ok": True})
+
+
+@router.get("/api/meetings/{meeting_id}/intake")
+async def api_intake(meeting_id: str, request: Request):  # type: ignore[no-untyped-def]
+    found = _service(request).intake_for(meeting_id)
+    if found is None:
+        return JSONResponse({"detail": "no intake evaluation"}, status_code=404)
+    return found
+
+
+@router.post("/api/meetings/{meeting_id}/intake")
+async def api_make_intake(meeting_id: str, request: Request):  # type: ignore[no-untyped-def]
+    """Evaluates the meeting as a client intake. POST + the Origin check: each one costs a model call."""
+    if (refused := _foreign_origin(request)) is not None:
+        return refused
+    service = _service(request)
+    page = service.page_for(meeting_id)
+    if page is None:
+        return JSONResponse({"detail": "unknown meeting"}, status_code=404)
+    if page["meeting"].get("in_progress"):  # an evaluation now would judge half a call
+        return JSONResponse({"detail": "the meeting is still running"}, status_code=409)
+    evaluation = await asyncio.to_thread(service.make_intake, meeting_id)
+    if evaluation is None:
+        return JSONResponse({"detail": "the evaluation could not be made"}, status_code=502)
+    return evaluation
 
 
 @router.post("/api/ask")
