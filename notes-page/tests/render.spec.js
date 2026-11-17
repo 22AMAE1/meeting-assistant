@@ -448,6 +448,30 @@ test("(H2) archive a meeting, then undo it", async ({ page }) => {
   expect(home.posts.at(-1).body.archived).toBe(false);
 });
 
+test("(H5) deadlines the meeting named are listed with a verify note, and exported", async ({ page }) => {
+  GOLDEN.meeting.deadlines = [
+    { what: "File the statement of claim", kind: "filing", when_text: "by December 5", date: "2026-12-05", owner: "Layla" },
+    { what: "Limitation period expires", kind: "limitation", when_text: "in two years" },
+  ];
+  try {
+    await page.goto(baseURL + "/?meeting=" + MEETING_ID);
+    const board = page.locator(".board.dl");
+    await expect(board).toContainText("File the statement of claim");
+    await expect(board).toContainText("by December 5 · 2026-12-05");
+    await expect(board).toContainText("Layla");
+    await expect(board).toContainText("Check every date yourself");
+    await expect(board.locator(".dl-item.k-limitation")).toContainText("Limitation period expires");
+    await expect(page.locator("#export")).toBeVisible();
+    const download = page.waitForEvent("download");
+    await page.locator("#export").click();
+    const text = require("fs").readFileSync(await (await download).path(), "utf8");
+    expect(text).toContain("## Deadlines");
+    expect(text).toContain("- **Filing:** File the statement of claim (by December 5 · 2026-12-05), Layla");
+  } finally {
+    delete GOLDEN.meeting.deadlines;
+  }
+});
+
 test("(H3) Halo sorts meetings by type; the user can set their own", async ({ page }) => {
   home.type = "planning";
   home.typeBy = "halo";

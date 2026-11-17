@@ -99,6 +99,16 @@ class MeetingPageMeetingDisagreements(BaseModel):
     resolution: str | None = None
 
 
+class MeetingPageMeetingDeadlines(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    what: str
+    kind: Literal["limitation", "filing", "hearing", "response", "follow_up", "other"]
+    when_text: str | None = None
+    date: str | None = None
+    owner: str | None = None
+
+
 class MeetingPageMeeting(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -110,6 +120,7 @@ class MeetingPageMeeting(BaseModel):
     title: str | None = None
     summary: str | None = None
     disagreements: list[MeetingPageMeetingDisagreements] | None = None
+    deadlines: list[MeetingPageMeetingDeadlines] | None = None
     in_progress: bool | None = None
 
 
@@ -275,6 +286,16 @@ class NotesReadyDisagreements(BaseModel):
     resolution: str | None = None
 
 
+class NotesReadyDeadlines(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+
+    what: str
+    kind: Literal["limitation", "filing", "hearing", "response", "follow_up", "other"]
+    when_text: str | None = None
+    date: str | None = None
+    owner: str | None = None
+
+
 class NotesReady(BaseModel):
     model_config = ConfigDict(extra='forbid')
 
@@ -287,6 +308,7 @@ class NotesReady(BaseModel):
     summary: str | None = None
     meeting_type: Literal["sprint", "planning", "discovery", "sales", "induction", "one_on_one", "interview", "other"] | None = None
     disagreements: list[NotesReadyDisagreements] | None = None
+    deadlines: list[NotesReadyDeadlines] | None = None
 
 class PairHello(BaseModel):
     model_config = ConfigDict(extra='forbid')

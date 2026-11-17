@@ -61,6 +61,8 @@ REBUILD_INSTRUCTIONS = (
 # Karim 2026-11-04: the notes list sorts meetings by type; same call, one more field.
 MEETING_TYPES = ("sprint", "planning", "discovery", "sales", "induction", "one_on_one", "interview", "other")
 
+DEADLINE_KINDS = ("limitation", "filing", "hearing", "response", "follow_up", "other")
+
 SUMMARY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
@@ -80,8 +82,19 @@ SUMMARY_SCHEMA: dict[str, Any] = {
             },
             "required": ["topic", "sides", "outcome", "resolution"],
             "additionalProperties": False}},
+        "deadlines": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "what": {"type": "string"},
+                "kind": {"type": "string", "enum": list(DEADLINE_KINDS)},
+                "when_text": {"type": "string"},
+                "date": {"type": "string"},
+                "owner": {"type": "string"},
+            },
+            "required": ["what", "kind", "when_text", "date", "owner"],
+            "additionalProperties": False}},
     },
-    "required": ["title", "summary", "meeting_type", "disagreements"],
+    "required": ["title", "summary", "meeting_type", "disagreements", "deadlines"],
     "additionalProperties": False,
 }
 SUMMARY_TRANSCRIPT_CHARS = 12_000  # ponytail: the meeting's last 12k chars; chunk + merge if long meetings need more
@@ -104,9 +117,16 @@ def summary_prompt(store: dict[str, Any]) -> str:
         "(product discovery or user research), sales (a customer or prospect "
         "call), induction (onboarding someone new), one_on_one (two people "
         "about work or growth), interview (hiring), or other. Use "
+        "deadlines: 0 to 8 dates or time limits someone in the meeting named "
+        "(limitation, filing, hearing, response, follow_up or other): what, kind, "
+        "when_text (the date as said, or empty), date (YYYY-MM-DD only when the "
+        "Meeting date below and the words make it certain, else empty), owner "
+        "(who must do it, or empty). Use only deadlines the transcript states; "
+        "never work out a limitation period or any date from the law yourself. Use "
         "only what the transcript says. Write both in the language most of the "
         "meeting used.\n\n"
-        f"Subject typed by the host: {store['meeting']['subject'] or 'none'}\n\n"
+        f"Subject typed by the host: {store['meeting']['subject'] or 'none'}\n"
+        f"Meeting date (UTC): {datetime.fromtimestamp((store['meeting']['t0_ms'] or 0) / 1000, UTC):%Y-%m-%d}\n\n"
         f"Points:\n{points or '- none'}\n\n"
         f"Transcript:\n{lines[-SUMMARY_TRANSCRIPT_CHARS:]}"
     )
@@ -131,6 +151,33 @@ def clean_disagreements(raw: Any) -> list[dict[str, Any]]:
             item["resolution"] = resolution
         out.append(item)
     return out[:5]
+
+
+def clean_deadlines(raw: Any) -> list[dict[str, Any]]:
+    """The model's deadlines cut to the contract; one without a what or a known kind drops."""
+    out: list[dict[str, Any]] = []
+    for d in raw if isinstance(raw, list) else []:
+        if not isinstance(d, dict) or d.get("kind") not in DEADLINE_KINDS:
+            continue
+        what = str(d.get("what") or "").strip()[:160]
+        if not what:
+            continue
+        item: dict[str, Any] = {"what": what, "kind": d["kind"]}
+        when_text = str(d.get("when_text") or "").strip()[:80]
+        if when_text:
+            item["when_text"] = when_text
+        date = str(d.get("date") or "").strip()
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", date):
+            try:
+                datetime.strptime(date, "%Y-%m-%d")
+                item["date"] = date
+            except ValueError:
+                pass
+        owner = str(d.get("owner") or "").strip()[:80]
+        if owner:
+            item["owner"] = owner
+        out.append(item)
+    return out[:8]
 
 
 def action_id_for(point_id: str) -> str:
@@ -242,7 +289,7 @@ class NotesBuilder:
             prompt=summary_prompt(store),
             schema=SUMMARY_SCHEMA,
             schema_name="notes.summary",
-            prompt_cache_key="notes-summary-v3",
+            prompt_cache_key="notes-summary-v4",
             timeout_s=NOTES_CALL_TIMEOUT_S,
         )
         data = result.data if result.ok and isinstance(result.data, dict) else {}
@@ -254,6 +301,9 @@ class NotesBuilder:
         disagreements = clean_disagreements(data.get("disagreements"))
         if disagreements:
             header["disagreements"] = disagreements
+        deadlines = clean_deadlines(data.get("deadlines"))
+        if deadlines:
+            header["deadlines"] = deadlines
         if header:
             self._header[meeting_id] = header
         else:

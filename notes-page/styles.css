@@ -740,3 +740,11 @@ button.fold[aria-expanded="false"]::after{transform:rotate(-45deg)}
 #view.home .home-band .mband-in{max-width:1312px;padding:0 32px}
 #view.home .home-band h1,#view.home .home-band .finding,#view.home .home-band .finding b,#view.home .home-band .finding button{color:#fff}
 @media (max-width:560px){#view.home .home-band{margin-top:-20px} #view.home .home-band .mband-in{padding:0 16px}}
+
+.dl-note{margin:0 0 10px;font-size:12px;color:var(--muted)}
+.dl-list{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.dl-item{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:14px}
+.dl-item.k-limitation .chip{background:#f6e4e1;color:#8a2d22}
+.dl-when{color:var(--muted);font-size:12px}
+.dl-owner{font-size:12px;color:var(--muted)}
+.dl-owner::before{content:"\2192 "}

@@ -98,7 +98,9 @@ def seed_db(path, *, ended=True, ready=True, user_tag=False, summary=False):
                 **({"title": "Launch date moves to Nov 12", "meeting_type": "planning",
                     "summary": "The launch moves to Nov 12. Layla owns it.",
                     "disagreements": [{"topic": "Launch date", "outcome": "settled",
-                                       "sides": [{"name": "Layla", "view": "Nov 12."}]}]}
+                                       "sides": [{"name": "Layla", "view": "Nov 12."}]}],
+                    "deadlines": [{"what": "File the statement of claim", "kind": "filing",
+                                   "when_text": "by December 5", "date": "2026-12-05"}]}
                    if summary else {}),
                 "people": [{
                     "name": "Layla", "role": "Engineering lead", "why": "Owns RTL.",
@@ -236,6 +238,8 @@ def test_ai_title_and_summary_from_notes_ready(tmp_path):
     assert page["meeting"]["title"] == "Launch date moves to Nov 12"
     assert page["meeting"]["summary"] == "The launch moves to Nov 12. Layla owns it."
     assert page["meeting"]["disagreements"][0]["topic"] == "Launch date"
+    assert page["meeting"]["deadlines"] == [{"what": "File the statement of claim", "kind": "filing",
+                                             "when_text": "by December 5", "date": "2026-12-05"}]
     assert client.get("/api/meetings").json()[0]["title"] == "Launch date moves to Nov 12"
 
 

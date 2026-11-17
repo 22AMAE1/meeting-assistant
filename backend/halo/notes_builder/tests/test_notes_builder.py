@@ -397,6 +397,27 @@ def test_disagreements_ride_on_notes_ready_and_bad_ones_drop(tmp_path):
     asyncio.run(run())
 
 
+def test_deadlines_ride_on_notes_ready_and_bad_ones_drop(tmp_path):
+    """Dates a lawyer must not miss: said in the meeting, never computed from the law."""
+    good = {"what": "File the statement of claim", "kind": "filing", "when_text": "by December 5",
+            "date": "2026-12-05", "owner": "Layla"}
+    bad_date = {"what": "Respond to the demand letter", "kind": "response", "when_text": "next Friday",
+                "date": "next Friday"}
+    async def run():
+        bus, llm, _, ready, _ = setup(tmp_path / "events.sqlite", [])
+        llm.summary_reply = {**llm.summary_reply, "deadlines": [
+            good, bad_date, {"what": "", "kind": "filing"}, {"what": "Something", "kind": "birthday"}]}
+        await bus.publish(ended_envelope())
+        await settle(bus)
+        assert validate_envelope(ready[0]) == []
+        assert ready[0]["data"]["deadlines"] == [
+            good, {"what": "Respond to the demand letter", "kind": "response", "when_text": "next Friday"}]
+        assert "deadlines:" in llm.summary_calls[0] and "Meeting date" in llm.summary_calls[0]
+        assert "never work out a limitation period" in llm.summary_calls[0]
+
+    asyncio.run(run())
+
+
 def test_the_latest_model_tag_wins_but_never_over_a_user_tag(tmp_path):
     """DECISIONS: latest user tag > latest model tag > guess."""
     path = tmp_path / "events.sqlite"
