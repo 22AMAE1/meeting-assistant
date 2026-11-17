@@ -644,3 +644,62 @@ def test_notes_added_during_a_meeting_feed_the_live_check_and_are_not_compared(t
     client, _, = recap_client_open(tmp_path, llm)
     got = client.post(f"/api/meetings/{MEETING}/reference", json={"name": "n.md", "text": "notes"}).json()
     assert got["name"] == "n.md" and "compare" not in got and llm.prompts == []
+
+
+INTAKE = {
+    "practice_area": "employment", "client_story": "Dismissed after 6 years, offered 2 weeks pay.",
+    "issues": [{"issue": "Dismissal without cause", "basis": "Wrongful dismissal: reasonable notice at common law",
+                "strength": "moderate", "facts_for": ["6 years of service", "No cause given"],
+                "gaps": ["Was there a signed contract with a termination clause?"]}],
+    "missing_facts": ["Age and salary", "Any written contract"],
+    "time_limits": ["Check general limitation period and any ESA complaint window"],
+    "assessment": {"rating": "possibly_viable", "reasoning": "Likely entitled to more than two weeks; contract unknown."},
+    "next_steps": ["Collect the employment contract and termination letter"],
+}
+
+
+class IntakeLLM:
+    def __init__(self, data=INTAKE):
+        self.data, self.prompts = data, []
+
+    def complete_json(self, *, prompt, schema, schema_name="", **_):
+        from types import SimpleNamespace
+        self.prompts.append(prompt)
+        return SimpleNamespace(ok=self.data is not None, data=self.data)
+
+
+def test_intake_evaluation_is_made_on_request_kept_and_reused(tmp_path):
+    llm = IntakeLLM()
+    client, data = recap_client(tmp_path, llm)
+    url = f"/api/meetings/{MEETING}/intake"
+    assert client.get(url).status_code == 404 and llm.prompts == []
+    made = client.post(url)
+    assert made.status_code == 200 and made.json()["issues"][0]["strength"] == "moderate"
+    assert made.json()["assessment"]["rating"] == "possibly_viable"
+    assert client.post(url).json() == made.json() and len(llm.prompts) == 1  # the second press costs nothing
+    assert client.get(url).json() == made.json()
+    from halo.notes_service.notes_service import NotesService
+    assert NotesService(Bus(), data_dir=data).intake_for(MEETING) == made.json()  # survives a restart
+    prompt = llm.prompts[0]
+    assert "Layla:" in prompt  # the transcript itself goes in, not just the points
+    assert "never work out a date" in prompt and "for a lawyer to review" in prompt
+
+
+def test_intake_evaluation_cuts_the_model_to_the_contract(tmp_path):
+    messy = {**INTAKE, "practice_area": "tax", "issues": [
+        INTAKE["issues"][0], {"issue": "", "basis": "x", "strength": "strong"}, {"issue": "A", "basis": "B", "strength": "certain"}],
+        "assessment": {"rating": "definitely", "reasoning": "r"}}
+    client, _ = recap_client(tmp_path, IntakeLLM(messy))
+    got = client.post(f"/api/meetings/{MEETING}/intake").json()
+    assert got["practice_area"] == "other" and len(got["issues"]) == 2
+    assert got["issues"][1]["strength"] == "unclear"  # an unknown strength is never shown as a rating
+    assert got["assessment"]["rating"] == "needs_more_info"
+
+
+def test_intake_evaluation_refusals(tmp_path):
+    client, _ = recap_client(tmp_path, IntakeLLM(None))
+    url = f"/api/meetings/{MEETING}/intake"
+    assert client.post(url, headers={"origin": "https://evil.example"}).status_code == 403
+    assert client.post("/api/meetings/unknown-id/intake").status_code == 404
+    assert client.get("/api/meetings/unknown-id/intake").status_code == 404
+    assert client.post(url).status_code == 502 and client.get(url).status_code == 404  # a failure is not kept
