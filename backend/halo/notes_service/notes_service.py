@@ -200,9 +200,11 @@ class NotesService:
             data = json.loads(self._folders_path().read_text(encoding="utf-8"))
             return {"folders": list(data.get("folders", [])), "meetings": dict(data.get("meetings", {})),
                     "archived": list(data.get("archived", [])), "types": dict(data.get("types", {})),
-                    "done": dict(data.get("done", {})), "deleted": dict(data.get("deleted", {}))}
+                    "done": dict(data.get("done", {})), "deleted": dict(data.get("deleted", {})),
+                    "matters": dict(data.get("matters", {}))}
         except (OSError, ValueError, AttributeError):
-            return {"folders": [], "meetings": {}, "archived": [], "types": {}, "done": {}, "deleted": {}}
+            return {"folders": [], "meetings": {}, "archived": [], "types": {}, "done": {}, "deleted": {},
+                    "matters": {}}
 
     def _save_folders(self, data: dict[str, Any]) -> None:
         # ponytail: whole-file rewrite, fine for a handful of folders on one PC
@@ -303,6 +305,15 @@ class NotesService:
             data["types"].pop(meeting_id, None)
         else:
             data["types"][meeting_id] = meeting_type
+        self._save_folders(data)
+
+    def set_matter(self, meeting_id: str, client: str, matter: str) -> None:
+        """The client and matter the user files this meeting under; both empty clears it."""
+        data = self._load_folders()
+        if client or matter:
+            data["matters"][meeting_id] = {"client": client, "matter": matter}
+        else:
+            data["matters"].pop(meeting_id, None)
         self._save_folders(data)
 
     # -- store reads --------------------------------------------------------
@@ -675,6 +686,9 @@ class NotesService:
                 if isinstance(ready.get("title"), str) and ready["title"].strip():
                     item["title"] = ready["title"].strip()
                 item["archived"] = meeting["meeting_id"] in filed["archived"]
+                filed_under = filed["matters"].get(meeting["meeting_id"], {})
+                item["client"] = filed_under.get("client", "")
+                item["matter"] = filed_under.get("matter", "")
                 mine = filed["types"].get(meeting["meeting_id"])
                 halo = ready.get("meeting_type") if ready.get("meeting_type") in MEETING_TYPES else None
                 item["meeting_type"] = mine or halo
@@ -1277,6 +1291,23 @@ async def api_meeting_type(request: Request):  # type: ignore[no-untyped-def]
         return JSONResponse({"detail": f"meeting_type must be one of {list(MEETING_TYPES)} or null"}, status_code=400)
     _service(request).set_type(body["meeting_id"], kind)
     return {"meeting_id": body["meeting_id"], "meeting_type": kind}
+
+
+MAX_MATTER_CHARS = 200
+
+
+@router.post("/api/meetings/matter")
+async def api_meeting_matter(request: Request):  # type: ignore[no-untyped-def]
+    if (refused := _foreign_origin(request)) is not None:
+        return refused
+    body = await _body(request)
+    client, matter = body.get("client"), body.get("matter")
+    if (not isinstance(body.get("meeting_id"), str) or not isinstance(client, str) or not isinstance(matter, str)
+            or max(len(client.strip()), len(matter.strip())) > MAX_MATTER_CHARS):
+        return JSONResponse({"detail": f"meeting_id, client and matter are required text, at most {MAX_MATTER_CHARS} characters"},
+                            status_code=400)
+    _service(request).set_matter(body["meeting_id"], client.strip(), matter.strip())
+    return {"meeting_id": body["meeting_id"], "client": client.strip(), "matter": matter.strip()}
 
 
 @router.get("/api/audio")
