@@ -95,7 +95,7 @@ def seed_db(path, *, ended=True, ready=True, user_tag=False, summary=False):
             (str(uuid.uuid4()), "2026-10-31T09:00:00Z", MEETING, json.dumps({
                 "meeting_id": MEETING, "project_id": "halo-q4",
                 "url": f"/notes/{MEETING}", "degraded": False,
-                **({"title": "Launch date moves to Nov 12", "meeting_type": "planning",
+                **({"title": "Launch date moves to Nov 12", "meeting_type": "employment",
                     "summary": "The launch moves to Nov 12. Layla owns it.",
                     "disagreements": [{"topic": "Launch date", "outcome": "settled",
                                        "sides": [{"name": "Layla", "view": "Nov 12."}]}]}
@@ -338,10 +338,10 @@ def test_meeting_type_from_the_builder_and_set_by_hand(tmp_path):
     """Karim 2026-11-04: Halo sorts each meeting by type; the user can change it."""
     client, _, _ = make_client(tmp_path, summary=True)
     item = client.get("/api/meetings").json()[0]
-    assert (item["meeting_type"], item["type_by"]) == ("planning", "halo")
-    assert client.post("/api/meetings/type", json={"meeting_id": MEETING, "meeting_type": "sales"}).status_code == 200
+    assert (item["meeting_type"], item["type_by"]) == ("employment", "halo")
+    assert client.post("/api/meetings/type", json={"meeting_id": MEETING, "meeting_type": "immigration"}).status_code == 200
     item = client.get("/api/meetings").json()[0]
-    assert (item["meeting_type"], item["type_by"]) == ("sales", "you")
+    assert (item["meeting_type"], item["type_by"]) == ("immigration", "you")
     assert client.post("/api/meetings/type", json={"meeting_id": MEETING, "meeting_type": "party"}).status_code == 400
     # null hands it back to Halo's pick.
     assert client.post("/api/meetings/type", json={"meeting_id": MEETING, "meeting_type": None}).status_code == 200
@@ -360,7 +360,7 @@ def test_new_writes_refuse_other_sites(tmp_path):
     for path, body in [("/api/folders/rename", {"folder_id": "x", "name": "y"}),
                        ("/api/folders/delete", {"folder_id": "x"}),
                        ("/api/meetings/archive", {"meeting_id": MEETING, "archived": True}),
-                       ("/api/meetings/type", {"meeting_id": MEETING, "meeting_type": "sales"})]:
+                       ("/api/meetings/type", {"meeting_id": MEETING, "meeting_type": "immigration"})]:
         assert client.post(path, json=body, headers=evil).status_code == 403, path
 
 

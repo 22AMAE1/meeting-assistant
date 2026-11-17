@@ -33,10 +33,8 @@ TYPES = json.loads((ROOT / "contracts" / "notes.ready.schema.json").read_text(en
 SCHEMA = {"type": "object", "properties": {"meeting_type": {"type": "string", "enum": TYPES}},
           "required": ["meeting_type"], "additionalProperties": False}
 PROMPT = (
-    "Pick the meeting type. sprint (sprint review, standup or retro), planning (roadmap, "
-    "launch or scheduling), discovery (product discovery or user research), sales (a customer "
-    "or prospect call), induction (onboarding someone new), one_on_one (two people about work "
-    "or growth), interview (hiring), or other.\n\nSubject: {subject}\nTitle: {title}\nSummary: {summary}"
+    "Pick the legal practice area of the meeting. "
+    "employment (employment law in Ontario: dismissal, severance, ESA, contracts, workplace issues), human_rights (human rights: discrimination, harassment, accommodation, HRTO or OHRC matters), education (Ontario school and education law: suspensions, expulsions, special education, IEPs, school boards), immigration (Canadian immigration: IRCC, permits, Express Entry, sponsorship, refugee or IRB matters), or other.\n\nSubject: {subject}\nTitle: {title}\nSummary: {summary}"
 )
 
 
