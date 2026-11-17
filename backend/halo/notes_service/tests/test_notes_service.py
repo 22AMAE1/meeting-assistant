@@ -109,7 +109,7 @@ def seed_db(path, *, ended=True, ready=True, user_tag=False, summary=False):
     conn.close()
 
 
-def make_client(tmp_path, **seed_kwargs):
+def make_client(tmp_path, privileged=False, **seed_kwargs):
     from halo.notes_service.notes_service import router
 
     data = tmp_path / "data"
@@ -122,7 +122,7 @@ def make_client(tmp_path, **seed_kwargs):
     seed_db(data / "events.sqlite", **seed_kwargs)
     bus = Bus()
     app = FastAPI()
-    app.state.notes_service = NotesService(bus, data_dir=data, static_dir=static)
+    app.state.notes_service = NotesService(bus, data_dir=data, static_dir=static, privileged=privileged)
     app.include_router(router)
     client = TestClient(app, headers={"host": "127.0.0.1:8765"})
     return client, bus, data
@@ -346,6 +346,15 @@ def test_meeting_type_from_the_builder_and_set_by_hand(tmp_path):
     # null hands it back to Halo's pick.
     assert client.post("/api/meetings/type", json={"meeting_id": MEETING, "meeting_type": None}).status_code == 200
     assert client.get("/api/meetings").json()[0]["type_by"] == "halo"
+
+
+def test_privileged_mode_is_reported_and_refuses_the_image_recap(tmp_path):
+    client, _, _ = make_client(tmp_path)
+    assert client.get("/api/privacy").json() == {"privileged": False}
+    client, _, _ = make_client(tmp_path / "p", privileged=True)
+    assert client.get("/api/privacy").json() == {"privileged": True}
+    refused = client.post(f"/api/meetings/{MEETING}/recap")
+    assert refused.status_code == 403 and "privileged" in refused.json()["detail"]
 
 
 def test_meeting_without_a_type_has_none(tmp_path):

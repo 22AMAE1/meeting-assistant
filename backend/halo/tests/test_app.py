@@ -17,3 +17,13 @@ def test_status_says_whether_the_meta_key_is_set(monkeypatch):
     assert client.get("/api/status").json() == {"meta_key": False}
     monkeypatch.setenv("META_API_KEY", "set")
     assert client.get("/api/status").json() == {"meta_key": True}
+
+
+def test_privileged_mode_is_on_by_default_and_turns_off_the_web_and_image_calls(monkeypatch):
+    monkeypatch.delenv("HALO_PRIVILEGED", raising=False)
+    monkeypatch.delenv("HALO_FACT_CHECK", raising=False)
+    app = create_app()
+    assert app.state.notes_service.privileged is True and app.state.fact_check is None
+    monkeypatch.setenv("HALO_PRIVILEGED", "0")
+    app = create_app()
+    assert app.state.notes_service.privileged is False and app.state.fact_check is not None

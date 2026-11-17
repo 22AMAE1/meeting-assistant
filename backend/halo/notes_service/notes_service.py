@@ -176,8 +176,12 @@ class NotesService:
         data_dir: Path | str | None = None,
         static_dir: Path | str | None = None,
         llm: Any = None,
+        privileged: bool = False,
     ) -> None:
         self._bus = bus
+        # Privileged mode (law firm default, set by app.py): nothing from a meeting goes to an
+        # image model, and the page is told so it can label what it shows and exports.
+        self.privileged = privileged
         self._llm = llm  # the shared model client, for Ask and the recap
         # ponytail: one image at a time for the whole app; each costs money and
         # nobody needs two at once, so no per-meeting locks.
@@ -1071,6 +1075,11 @@ async def api_search(request: Request, q: str | None = None):  # type: ignore[no
 ASK_MAX_CHARS = 300
 
 
+@router.get("/api/privacy")
+async def api_privacy(request: Request):  # type: ignore[no-untyped-def]
+    return {"privileged": _service(request).privileged}
+
+
 @router.get("/api/meetings/{meeting_id}/recap")
 async def api_recap(meeting_id: str, request: Request):  # type: ignore[no-untyped-def]
     path = _service(request).recap_file(meeting_id)
@@ -1085,6 +1094,9 @@ async def api_make_recap(meeting_id: str, request: Request):  # type: ignore[no-
     if (refused := _foreign_origin(request)) is not None:
         return refused
     service = _service(request)
+    if service.privileged:
+        return JSONResponse({"detail": "privileged mode: meeting content is not sent to the image model"},
+                            status_code=403)
     page = service.page_for(meeting_id)
     if page is None:
         return JSONResponse({"detail": "unknown meeting"}, status_code=404)

@@ -47,7 +47,7 @@ const postedTags = [];
 const folders = { list: [], byMeeting: {} };
 const status = { meta_key: true };
 const audio = { status: 404, hits: 0 };
-const home = { archived: false, type: null, typeBy: null, urgent: 1, posts: [] };
+const home = { privileged: false, archived: false, type: null, typeBy: null, urgent: 1, posts: [] };
 
 function send(res, status, body, type) {
   res.writeHead(status, { "Content-Type": type || "application/json" });
@@ -65,6 +65,9 @@ test.beforeAll(async () => {
     if (req.method === "GET" && url.pathname === "/api/status") {
       send(res, 200, JSON.stringify(status));
       return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/privacy") {
+      return send(res, 200, JSON.stringify({ privileged: home.privileged }));
     }
     if (req.method === "GET" && url.pathname === "/api/meetings") {
       return send(res, 200, JSON.stringify([
@@ -186,7 +189,7 @@ test.beforeEach(async ({ page }) => {
   status.meta_key = true;
   audio.status = 404;
   audio.hits = 0;
-  Object.assign(home, { archived: false, deleted: false, type: null, typeBy: null, urgent: 1, posts: [] });
+  Object.assign(home, { privileged: false, archived: false, deleted: false, type: null, typeBy: null, urgent: 1, posts: [] });
   folders.list.length = 0;
   for (const k of Object.keys(folders.byMeeting)) delete folders.byMeeting[k];
 });
@@ -446,6 +449,19 @@ test("(H2) archive a meeting, then undo it", async ({ page }) => {
   await page.locator("#toast .toast-undo").click();
   await expect(page.locator("#list .row .arch-tag")).toHaveCount(0);
   expect(home.posts.at(-1).body.archived).toBe(false);
+});
+
+test("(H4) privileged mode labels the preview and the export, and hides the image recap", async ({ page }) => {
+  home.privileged = true;
+  await page.goto(baseURL + "/");
+  await expect(page.locator("#preview .pchip")).toHaveText("Privileged & confidential");
+  await page.goto(baseURL + "/?meeting=" + MEETING_ID);
+  await expect(page.locator(".recap")).toHaveCount(0);
+  const download = page.waitForEvent("download");
+  await expect(page.locator("#export")).toBeVisible();
+  await page.locator("#export").click();
+  const text = require("fs").readFileSync(await (await download).path(), "utf8");
+  expect(text.startsWith("**PRIVILEGED & CONFIDENTIAL: solicitor-client privilege**")).toBe(true);
 });
 
 test("(H3) Halo sorts meetings by type; the user can set their own", async ({ page }) => {
