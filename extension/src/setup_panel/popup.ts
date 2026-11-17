@@ -313,6 +313,12 @@ export async function initPopup(root: HTMLElement, deps: PopupDeps): Promise<voi
     (option as HTMLOptionElement).selected = (saved.context?.viewer_lang ?? "en") === lang;
     langSelect.appendChild(option);
   }
+  const typeSelect = el("select", { id: "session-type", class: "in" }) as HTMLSelectElement;
+  for (const [value, label] of [["general", "Meeting"], ["hearing", "Hearing"], ["mediation", "Mediation"]] as const) {
+    const option = el("option", { value }, label);
+    (option as HTMLOptionElement).selected = (saved.context?.session_type ?? "general") === value;
+    typeSelect.appendChild(option);
+  }
   const projectInput = el("input", { id: "project", class: "in", placeholder: "Optional" }) as HTMLInputElement;
   projectInput.value = saved.context?.project_id ?? "";
   const rolesBox = el("div", { id: "roles" });
@@ -357,6 +363,7 @@ export async function initPopup(root: HTMLElement, deps: PopupDeps): Promise<voi
   prefsSection.querySelector(".head")?.append(el("span", { class: "sp" }), prefsSaved);
   const prefsGrid = el("div", { class: "two" });
   field(prefsGrid, "My points language", langSelect);
+  field(prefsGrid, "Session type", typeSelect);
   field(prefsGrid, "Project", projectInput);
   prefsSection.appendChild(prefsGrid);
   // Viewer preference: bubble urgency-mark style. Writes immediately so the
@@ -412,12 +419,13 @@ export async function initPopup(root: HTMLElement, deps: PopupDeps): Promise<voi
       rows,
       viewerLang: langSelect.value === "ar" ? "ar" : "en",
       projectId: projectInput.value,
+      sessionType: typeSelect.value === "hearing" || typeSelect.value === "mediation" ? typeSelect.value : "general",
     };
     const data = buildMeetingContext(formState);
     await deps.storage.saveContext(data);
     deps.port.postMessage({ type: "meeting.context", data });
   };
-  for (const input of [langSelect, projectInput]) {
+  for (const input of [langSelect, typeSelect, projectInput]) {
     input.addEventListener("change", () => {
       void saveContext().then(
         () => flash(prefsSaved, "Saved ✓"),

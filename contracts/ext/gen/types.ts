@@ -175,6 +175,7 @@ export interface MeetingContext {
   agenda: string[];
   roles: MeetingContextRoles[];
   viewer_lang: "en" | "ar";
+  session_type?: "general" | "hearing" | "mediation";
   project_id?: string;
 }
 

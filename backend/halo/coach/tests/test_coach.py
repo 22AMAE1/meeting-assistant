@@ -338,3 +338,41 @@ def test_a_coach_call_gets_more_time_than_a_live_point():
         assert llm.timeouts == [COACH_TIMEOUT_S] and COACH_TIMEOUT_S >= 8
 
     asyncio.run(run())
+
+
+def legal_prompt(session_type):
+    bus = Bus()
+    coach = Coach(bus, FakeLLM([]))
+    context = {"subject": "Smith v. Acme", "agenda": [], "roles": [], "viewer_lang": "en"}
+    if session_type:
+        context["session_type"] = session_type
+
+    async def run():
+        envelope = env("meeting.context", context, 90)
+        assert validate_envelope(envelope) == []
+        await bus.publish(envelope)
+        await bus.publish(turn("The witness says he never got the letter", name="Opposing counsel", n=2))
+
+    asyncio.run(run())
+    return coach.build_prompt(MEETING)
+
+
+def test_a_hearing_gets_courtroom_coaching_and_never_states_an_objection_is_valid():
+    prompt = legal_prompt("hearing")
+    assert "LEGAL SESSION: HEARING" in prompt
+    assert "earlier statement" in prompt and "consider objecting" in prompt
+    assert "never say an objection or a rule is valid" in prompt
+    assert "LEGAL SESSION: MEDIATION" not in prompt
+
+
+def test_a_mediation_tracks_offers_and_interests():
+    prompt = legal_prompt("mediation")
+    assert "LEGAL SESSION: MEDIATION" in prompt
+    assert "offer" in prompt and "interest" in prompt and "in writing" in prompt
+    assert "LEGAL SESSION: HEARING" not in prompt
+
+
+def test_a_general_meeting_gets_no_legal_block():
+    for session_type in (None, "general"):
+        prompt = legal_prompt(session_type)
+        assert "LEGAL SESSION" not in prompt
