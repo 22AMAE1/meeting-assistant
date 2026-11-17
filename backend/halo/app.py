@@ -1,0 +1,206 @@
+"""Composition root (the one import-linter exception): wires the modules,
+creates the binary queues and mounts the routers. Created in Wave 0 so
+`uv run halo` boots early; each W1 backend PR adds its own wiring lines here.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+import socket
+from collections.abc import MutableMapping
+from contextlib import asynccontextmanager
+from pathlib import Path
+
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import RedirectResponse
+
+from halo.bus import Bus
+from halo.classifier import Classifier
+from halo.coach import Coach
+from halo.correlator import Correlator
+from halo.event_store import EventStore
+from halo.fact_check import FactCheck
+from halo.gateway import Gateway, host_check, router
+from halo.insight import Insight
+from halo.llm import LLMClient
+from halo.monitor import health_loop, log_config
+from halo.notes_builder import NotesBuilder
+from halo.notes_service import NotesService
+from halo.notes_service import router as notes_router
+from halo.recorder import Recorder
+from halo.transcriber import Transcriber
+from halo.transcriber.transport import WsTransport
+from rig.fakes.config import engine_config
+
+HOST, PORT = "127.0.0.1", 8765
+_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def load_dotenv(path: Path | str | None = None, *,
+                _environ: MutableMapping[str, str] | None = None) -> Path | None:
+    """Load `KEY=VALUE` lines from the repo-root `.env` into the environment.
+
+    Never overrides a variable that is already set, and never prints values:
+    callers report missing key *names* only. Returns the file loaded, or None
+    when there is no file to load.
+    """
+    env = os.environ if _environ is None else _environ
+    target = Path(path) if path is not None else Path(__file__).resolve().parents[2] / ".env"
+    try:
+        text = target.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        if line[:7].lower() == "export ":
+            line = line[7:].lstrip()
+        name, _, value = line.partition("=")
+        name = name.strip()
+        if not _KEY_RE.match(name) or name in env:
+            continue
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
+            value = value[1:-1]
+        env[name] = value
+    return target
+
+
+def _data_dir() -> Path:
+    return Path(os.environ.get("HALO_DATA_DIR") or "data")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):  # type: ignore[no-untyped-def]
+    # Background loops need a running event loop, so they start here.
+    app.state.gateway.start()
+    app.state.insight.start()
+    app.state.classifier.start()
+    app.state.coach.start()
+    if app.state.fact_check:
+        app.state.fact_check.start()
+    app.state.recorder.start()
+    health = asyncio.create_task(health_loop(app, _data_dir()))
+    yield
+    health.cancel()
+    app.state.recorder.stop()
+    app.state.coach.stop()
+    if app.state.fact_check:
+        app.state.fact_check.stop()
+    app.state.classifier.stop()
+    app.state.insight.stop()
+    app.state.gateway.stop()
+
+
+def create_app(bus: Bus | None = None) -> FastAPI:
+    app = FastAPI(title="Halo backend", lifespan=_lifespan)
+    app.state.bus = bus or Bus()
+    # Bounded binary queues (no envelope): Gateway -> Transcriber / Recorder.
+    app.state.audio_tab_queue = asyncio.Queue(maxsize=200)
+    app.state.audio_mic_queue = asyncio.Queue(maxsize=200)
+    app.state.rec_queue = asyncio.Queue(maxsize=200)
+    # Event Store tap: every accepted envelope lands in events.sqlite.
+    app.state.store = EventStore(_data_dir() / "events.sqlite")
+    app.state.bus.set_tap(app.state.store.tap)
+    app.state.bus.register_health("event_store", app.state.store.health_status)
+    # Shared model client (llm lane): constructed keyless-safe; per-call
+    # failures are typed results, so wiring never needs keys to exist yet.
+    app.state.llm = LLMClient()
+    app.state.bus.register_health("llm", app.state.llm.health)
+    app.state.bus.register_health("llm_spend", app.state.llm.usage)  # tokens + estimated USD
+    # Gateway owns /ws, /pair and the Host + Origin checks.
+    app.state.gateway = Gateway(
+        app.state.bus,
+        data_dir=_data_dir(),
+        audio_tab=app.state.audio_tab_queue,
+        audio_mic=app.state.audio_mic_queue,
+        rec=app.state.rec_queue,
+        extension_id=os.environ.get("HALO_EXTENSION_ID"),
+    )
+    app.include_router(router)
+    app.middleware("http")(host_check)
+    # Transcriber: two Voice sessions fed from the bounded audio queues.
+    # The endpoint swap is the only fake seam (rig.fakes.config).
+    asr_url = engine_config()["asr_url"]
+    app.state.transcriber = Transcriber(
+        app.state.bus,
+        app.state.audio_tab_queue,
+        app.state.audio_mic_queue,
+        lambda stream, mode: WsTransport(asr_url),
+        key=os.environ.get("META_API_KEY", ""),
+    )
+    # Correlator: tile + name on every final turn (internal health only).
+    app.state.correlator = Correlator(app.state.bus)
+    # Insight: live points from attributed turns via the shared model client.
+    app.state.insight = Insight(app.state.bus, app.state.llm)
+    app.state.bus.register_health("insight", app.state.insight.health)
+    # Classifier: post-hoc kind/urgency tags via the shared model client.
+    app.state.classifier = Classifier(app.state.bus, app.state.llm)
+    app.state.bus.register_health("tagger", app.state.classifier.health)
+    # Coach: the slow lane, 1-3 steering tips about once a minute.
+    app.state.coach = Coach(app.state.bus, app.state.llm)
+    # Claims go to a web search (and to the meeting's reference notes, a file the Notes
+    # Service writes under data/references); HALO_FACT_CHECK=0 keeps them off the web.
+    fact_check_on = os.environ.get("HALO_FACT_CHECK") != "0"
+    app.state.fact_check = FactCheck(app.state.bus, app.state.llm, data_dir=_data_dir()) if fact_check_on else None
+    # Notes Builder: meeting.ended in, one validated notes.ready out.
+    # The store file is the Event Store's own; this lane only ever reads it.
+    app.state.notes_builder = NotesBuilder(
+        app.state.bus, app.state.llm, db_path=_data_dir() / "events.sqlite")
+    # Notes service: stateless HTTP reads over the store file + notes-page
+    # shell; no background loop, so nothing joins the lifespan.
+    app.state.notes_service = NotesService(app.state.bus, data_dir=_data_dir(), llm=app.state.llm)
+    app.include_router(notes_router)
+    # Recorder: rec queue drain loop; files + index under the data dir.
+    app.state.recorder = Recorder(app.state.bus, data_dir=_data_dir(),
+                                  rec_queue=app.state.rec_queue)
+
+    @app.get("/", include_in_schema=False)
+    async def root() -> RedirectResponse:
+        return RedirectResponse("/notes/")  # the meetings list is the front page
+
+    @app.get("/healthz")
+    async def healthz() -> dict:
+        return {"status": "ok", "bus_health": app.state.bus.health()}
+
+    @app.get("/api/status")
+    async def status() -> dict:
+        """Read by the notes page to tell a keyless user why nothing happens."""
+        return {"meta_key": bool(os.environ.get("META_API_KEY"))}
+
+    return app
+
+
+# Keys must be in the environment before the module-level app builds its clients.
+load_dotenv()
+app = create_app()
+
+
+def main() -> None:
+    if os.environ.get("HALO_FAKES") != "1":
+        if not os.environ.get("META_API_KEY"):
+            print("warning: META_API_KEY is empty in .env: no transcripts, points or notes until you add it "
+                  "(the tests need no key: uv run pytest backend contracts -q)")
+        if not os.environ.get(os.environ.get("HALO_PRIMARY_KEY_VAR") or "BASETEN_API_KEY"):
+            print("note: no Spark Open key, so every text call runs on muse-spark-1.3-contributor (fine)")
+    # Check the port before the banner: a judge saw "Halo backend on ..." and then a bind error.
+    with socket.socket() as probe:
+        try:
+            probe.bind((HOST, PORT))
+        except OSError:
+            print(f"Port {PORT} is already in use: another Halo backend is probably running. "
+                  "Close that window (or use it) and try again.")
+            raise SystemExit(1) from None
+    print(f"Halo backend on http://{HOST}:{PORT} - pairing code: {app.state.gateway.pairing.current_code}",
+          flush=True)
+    _data_dir().mkdir(parents=True, exist_ok=True)
+    print(f"Logs for agents: {_data_dir() / 'backend.log'}, alerts.jsonl, health.json", flush=True)
+    uvicorn.run(app, host=HOST, port=PORT, log_config=log_config(_data_dir()))
+
+
+if __name__ == "__main__":
+    main()

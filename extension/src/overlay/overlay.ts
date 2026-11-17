@@ -1,0 +1,481 @@
+// Overlay core (Frame mode first): store + layout + renderer. Tokens from
+// docs/ui/overlay-mix-b.html; geometry/timing from docs/ui/OVERLAY-UX.md.
+// DOM is built with textContent only (Meet enforces Trusted Types). One
+// chip element per point id; renders only move/update/fold existing chips.
+import type {
+  FacesUpdate, PointsUpsert, SpeakerActive, TagsSet, TilesSnapshot, TilesSnapshotTiles,
+} from "../../../contracts/ext/gen/types";
+import { KIND_GLYPHS } from "./tokens";
+
+export type PointUpsert = PointsUpsert;
+
+// Urgency-mark style (viewer setting, storage key `halo.urgencyStyle`):
+// "words" renders draft-2 word tabs (the default), "symbols" renders
+// draft-1 shape seals scaled ~25% down. Tab words are localised to the
+// bubble language (Arabic bubbles get Arabic words, English bubbles
+// English; point lang is en|ar per contract).
+export type UrgencyStyle = "words" | "symbols";
+type Urgency = NonNullable<PointsUpsert["urgency"]>;
+const URGENCY_WORDS: Record<"en" | "ar", Record<Urgency, string>> = {
+  en: { urgent: "URGENT", medium: "MEDIUM", later: "LATER" },
+  ar: { urgent: "عاجل", medium: "متوسط", later: "لاحقاً" },
+};
+const URGENCY_GLYPHS: Record<Urgency, string> = { urgent: "!", medium: "=", later: "" };
+
+/** Summed chip geometry for the fit rule (OVERLAY-UX section 5: fit is
+ * measured from summed chip heights, never live offsets). */
+export const CHIP_HEIGHT_PX = 28;
+export const CHIP_GAP_PX = 6;
+
+export class FakeClock {
+  constructor(public now = 0) {}
+}
+export class SystemClock {
+  get now(): number { return Date.now(); }
+}
+
+export interface El {
+  textContent: string;
+  setAttribute(name: string, value: string): void;
+  appendChild(child: El): El;
+  remove(): void;
+  classList: { add(c: string): void; toggle(c: string, on?: boolean): void; contains(c: string): boolean };
+  style: { setProperty(name: string, value: string): void };
+}
+export interface DocLike {
+  createElement(tag: string): El;
+}
+
+// ponytail: the backend is always local (DECISIONS 10: one app on 127.0.0.1:8765).
+export const NOTES_ORIGIN = "http://127.0.0.1:8765";
+
+/** Absolute http(s) link for notes.ready `url` (the backend sends `/notes/{id}`); null otherwise. */
+export function notesHref(url: unknown): string | null {
+  if (typeof url !== "string") return null;
+  try {
+    const u = new URL(url, NOTES_ORIGIN);
+    return u.protocol === "http:" || u.protocol === "https:" ? u.href : null;
+  } catch {
+    return null;
+  }
+}
+
+export function quoteDirection(quote: string): "rtl" | "ltr" {
+  const arabic = (quote.match(/[؀-ۿ]/g) ?? []).length;
+  const latin = (quote.match(/[A-Za-z]/g) ?? []).length;
+  return arabic >= latin && arabic > 0 ? "rtl" : "ltr";
+}
+
+export interface TileGeom {
+  rect: number[];
+  video_w: number;
+  video_h: number;
+  fit: "cover" | "contain";
+  is_self: boolean;
+}
+
+/** Project a 0..1 face box from the source frame onto the tile (object-fit). */
+export function projectFaceBox(tile: TileGeom, box: number[]): { x: number; y: number; w: number; h: number } {
+  const [rx, ry, tw, th] = tile.rect;
+  const scale = tile.fit === "cover"
+    ? Math.max(tw / tile.video_w, th / tile.video_h)
+    : Math.min(tw / tile.video_w, th / tile.video_h);
+  const ox = (tw - tile.video_w * scale) / 2;
+  const oy = (th - tile.video_h * scale) / 2;
+  let x = rx + ox + box[0] * tile.video_w * scale;
+  const w = box[2] * tile.video_w * scale;
+  if (tile.is_self) x = rx + tw - (x - rx) - w; // mirrored self tile flips x
+  return { x, y: ry + oy + box[1] * tile.video_h * scale, w, h: box[3] * tile.video_h * scale };
+}
+
+interface StoredPoint extends PointsUpsert {
+  arrivedMs: number;
+  userTagged: boolean;
+  el?: El;
+}
+
+// ponytail: measured live, Meet's minimized self view is 234-427 px wide. A smaller
+// tile falls back to Frame view by itself; tune this if a dense grid loses Camera view.
+const MIN_CAMERA_TILE_W = 480;
+
+/** A source URL safe to link, with its host for the label; null for anything but http(s). */
+export function sourceLink(url: string): { href: string; host: string } | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return null;
+    return { href: url, host: parsed.hostname.replace(/^www\./, "") };
+  } catch {
+    return null;
+  }
+}
+
+export interface FactCheckCard {
+  claim: string;
+  verdict: "supported" | "disputed";
+  note: string;
+  sources: string[];
+  lang: "en" | "ar";
+  /** The sentence from the viewer's reference notes that settled it (Karim 2026-11-04). */
+  notes_quote?: string;
+}
+
+export class Overlay {
+  points = new Map<string, StoredPoint>();
+  hidden = false;
+  // Badge menu switches (Karim 2026-11-04): each layer can be turned off.
+  show = { names: true, points: true, coach: true, facts: true };
+  status: unknown = null;
+  notesToast: unknown = null;
+  // Meeting coach (coach.tips): the newest 0-3 tips + optional alert; null until the first.
+  coach: { tips: string[]; alert?: string; lang: "en" | "ar" } | null = null;
+  // Fact Check (claim.checked): every claim checked this meeting, newest first, until dismissed.
+  factChecks: FactCheckCard[] = [];
+  perFace = 3;
+  private tiles = new Map<string, TilesSnapshotTiles>();
+  private tileOrder: string[] = [];
+  private faces = new Map<string, FacesUpdate["face"]>();
+  private seenEnvelopes = new Set<string>();
+  private archived = new Set<string>();
+  private thinkingStart = new Map<string, number>();
+  // Live caption (transcript.partial): the words being said per stream, and
+  // the tile Meet last marked speaking (kept after speaking=false: the words
+  // arrive 1-2 s after the highlight).
+  private captions = { tab: "", mic: "" };
+  private speakingTile: string | null = null;
+  private layers = new Map<string, El>();
+  private overflowEls = new Map<string, El>();
+  private expanded = new Set<string>(); // tiles whose +N the viewer opened
+  urgencyStyle: UrgencyStyle = "words";
+  viewMode: "face" | "frame" = "face"; // frame: never follow a face (popup "View")
+
+  setViewMode(mode: unknown): void {
+    if (mode === "face" || mode === "frame") this.viewMode = mode;
+  }
+
+  constructor(private clock: { now: number }) {}
+
+  /** Switch the urgency-mark style; the next render() rebuilds all marks. */
+  setUrgencyStyle(style: unknown): void {
+    if (style === "words" || style === "symbols") this.urgencyStyle = style;
+  }
+
+  applyTiles(snapshot: TilesSnapshot): void {
+    this.tiles.clear();
+    this.tileOrder = snapshot.tiles.map((t) => t.tile_id);
+    for (const t of snapshot.tiles) this.tiles.set(t.tile_id, t);
+  }
+
+  /** The meeting stopped (Stop, or the call was left): clear everything it put
+   * on the page, urgent points included. The notes toast stays: it is the
+   * way to the notes. */
+  endMeeting(): void {
+    this.ended = true; // replies still in flight must not refill the page
+    this.points.clear();
+    this.coach = null;
+    this.factChecks = [];
+    this.captions = { tab: "", mic: "" };
+    this.faces.clear();
+    this.thinkingStart.clear();
+    this.expanded.clear();
+    this.speakingTile = null;
+  }
+
+  /** The next Start: live envelopes count again. */
+  startMeeting(): void {
+    this.ended = false;
+  }
+
+  private ended = false;
+
+  /** Set by boot(): redraw now (faces arrive outside backend envelopes). */
+  requestRender: () => void = () => {};
+
+  applyFaces(update: FacesUpdate): void {
+    this.faces.set(update.tile_id, update.face);
+  }
+
+  applySpeakerActive(active: SpeakerActive): void {
+    if (active.speaking) this.speakingTile = active.tile_id;
+    else this.thinkingStart.set(active.tile_id, this.clock.now);
+  }
+
+  applyEnvelope(env: { id: string; type: string; data: Record<string, unknown> }): void {
+    if (this.ended && ["points.upsert", "tags.set", "coach.tips", "claim.checked", "transcript.partial"].includes(env.type)) return;
+    if (env.type === "transcript.partial") {
+      // ponytail: no dedupe, a repeat caption is harmless; keeps seenEnvelopes small
+      const { stream, text } = env.data as { stream: "tab" | "mic"; text: string };
+      this.captions[stream] = text;
+      return;
+    }
+    if (this.seenEnvelopes.has(env.id)) return; // dedupe by envelope id
+    this.seenEnvelopes.add(env.id);
+    const data = env.data as never;
+    if (env.type === "points.upsert") this.applyPointsUpsert(data, env.id);
+    else if (env.type === "tags.set") this.applyTagsSet(data);
+    else if (env.type === "speaker.mapped") {
+      const mapped = data as { tile_id: string; name: string };
+      for (const p of this.points.values()) {
+        if (p.tile_id === mapped.tile_id) p.speaker_name = mapped.name;
+      }
+    } else if (env.type === "system.status") this.status = env.data;
+    else if (env.type === "notes.ready") this.notesToast = env.data;
+    else if (env.type === "coach.tips") this.coach = env.data as never;
+    else if (env.type === "claim.checked") this.factChecks = [env.data as never, ...this.factChecks];
+  }
+
+  applyPointsUpsert(point: PointsUpsert, _envelopeId?: string): void {
+    if (point.replaces) this.points.delete(point.replaces);
+    const existing = this.points.get(point.point_id);
+    if (existing) {
+      Object.assign(existing, point, { arrivedMs: this.clock.now }); // same element, lifetime restarts
+    } else {
+      this.points.set(point.point_id, { ...point, arrivedMs: this.clock.now, userTagged: false });
+    }
+    this.thinkingStart.delete(point.tile_id); // a point landing ends thinking
+  }
+
+  applyTagsSet(tag: TagsSet): void {
+    if (tag.target !== "point") return;
+    const stored = this.points.get(tag.target_id);
+    if (!stored) return;
+    if (tag.source === "user") {
+      stored.userTagged = true;
+    } else if (stored.userTagged) {
+      return; // a model tag after a user tag is ignored everywhere
+    }
+    if (tag.kind) stored.kind = tag.kind;
+    if (tag.urgency) stored.urgency = tag.urgency;
+  }
+
+  /** Every point stays until archived (Karim 2026-11-04): urgent first, then newest. */
+  private live(tileId: string): StoredPoint[] {
+    const urgent = (p: StoredPoint) => (p.urgency === "urgent" ? 0 : 1);
+    return [...this.points.values()]
+      .filter((p) => p.tile_id === tileId && !this.archived.has(p.point_id))
+      .sort((a, b) => urgent(a) - urgent(b) || b.arrivedMs - a.arrivedMs || a.rank - b.rank);
+  }
+
+  dismissFact(check: FactCheckCard): void {
+    this.factChecks = this.factChecks.filter((c) => c !== check);
+  }
+
+  /** The viewer handled it: gone from the bubbles (the notes keep it). */
+  archive(pointId: string): void {
+    this.archived.add(pointId); // ponytail: per page load; a reload brings urgent points back
+  }
+
+  visiblePoints(tileId: string): StoredPoint[] {
+    return this.live(tileId).slice(0, this.maxVisible(tileId));
+  }
+
+  /** The +N chip opens every live point on the tile; "Less" folds them back. */
+  toggleExpanded(tileId: string): void {
+    if (!this.expanded.delete(tileId)) this.expanded.add(tileId);
+  }
+
+  /** Chips that fit above the captions floor (normal cap when no floor). */
+  private maxVisible(tileId: string, folded = false): number {
+    if (!folded && this.expanded.has(tileId)) return Infinity; // ponytail: an open stack may run past the captions floor
+    const cap = Math.min(this.perFace, 3);
+    const { stackPos, floorY } = this.layout(tileId);
+    if (floorY === null) return cap;
+    let n = 0;
+    while (n < cap && stackPos.y + (n + 1) * CHIP_HEIGHT_PX + n * CHIP_GAP_PX <= floorY) n += 1;
+    return n; // a bubble's bottom never goes below the captions top edge
+  }
+
+  /** Bottom edge (px, layout space) of the lowest visible bubble on a tile. */
+  bubbleBottom(tileId: string): number {
+    const n = this.visiblePoints(tileId).length;
+    const { stackPos } = this.layout(tileId);
+    return n === 0 ? stackPos.y : stackPos.y + n * CHIP_HEIGHT_PX + (n - 1) * CHIP_GAP_PX;
+  }
+
+  overflowCount(tileId: string): number {
+    return Math.max(0, this.live(tileId).length - this.visiblePoints(tileId).length);
+  }
+
+  layout(tileId: string): {
+    mode: "face" | "frame";
+    namePos: { x: number; y: number };
+    stackPos: { x: number; y: number };
+    floorY: number | null;
+    faceBox?: { x: number; y: number; w: number; h: number };
+    side?: "right" | "left"; // face mode: which side of the face the stack sits on
+  } {
+    const tile = this.tiles.get(tileId);
+    const face = this.faces.get(tileId);
+    const index = this.tileOrder.indexOf(tileId);
+    // Captions floor: captions_rect's top edge, in the same space as
+    // stackPos (page space for Face mode, tile space for Frame mode).
+    // null captions_rect = no floor.
+    const captionsTop = tile?.captions_rect ? tile.captions_rect[1] : null;
+    if (tile && face && this.viewMode === "face" && index >= 0 && index < 6 && tile.rect[2] >= MIN_CAMERA_TILE_W) {
+      const box = projectFaceBox(tile, face.box);
+      const roomRight = tile.rect[0] + tile.rect[2] - (box.x + box.w);
+      const right = roomRight >= box.x - tile.rect[0];
+      const stackX = right
+        ? box.x + box.w + Math.max(10, tile.rect[2] * 0.026)
+        : Math.max(tile.rect[0] + 10, box.x - 160);
+      // The box is page space; the tile's layer is already placed at the
+      // tile, so positions are made tile-local (live 2026-11-02: they were
+      // offset twice). The name's anchor is its bottom centre, above the head.
+      const [rx, ry] = tile.rect;
+      return {
+        mode: "face",
+        // ponytail: hair is ~35% of the face box above it; tune if pills float high
+        namePos: { x: box.x + box.w / 2 - rx, y: Math.max(21, box.y - 0.35 * box.h - 6 - ry) },
+        stackPos: { x: stackX - rx, y: box.y - ry },
+        floorY: captionsTop !== null ? captionsTop - ry : null,
+        faceBox: box,
+        side: right ? "right" : "left",
+      };
+    }
+    // Frame mode (this PR's shipped path): name + stack pinned inside the tile.
+    return {
+      mode: "frame",
+      namePos: { x: 10, y: 10 },
+      stackPos: { x: 10, y: 44 },
+      floorY: captionsTop !== null && tile ? captionsTop - tile.rect[1] : null,
+    };
+  }
+
+  thinking(tileId: string, reducedMotion: boolean): "sweep" | "dotted" | null {
+    const start = this.thinkingStart.get(tileId);
+    if (start === undefined || this.clock.now - start >= 5000) return null;
+    return reducedMotion ? "dotted" : "sweep";
+  }
+
+  handleKey(ev: { altKey: boolean; ctrlKey: boolean; shiftKey?: boolean; metaKey?: boolean; key: string; repeat: boolean }): boolean {
+    // Bare Alt+H only: Ctrl/Shift/Meta+Alt+H pass to Meet
+    if (!ev.altKey || ev.key.toLowerCase() !== "h" || ev.ctrlKey || ev.shiftKey || ev.metaKey) return false;
+    if (!ev.repeat) this.hidden = !this.hidden; // bare Alt+H only; key repeat ignored
+    return true;
+  }
+
+  badgeText(): string {
+    return this.hidden ? "Halo · hidden" : "Halo";
+  }
+
+  popover(pointId: string): {
+    kind: string; speaker: string; text: string; quote: string;
+    quoteDir: "rtl" | "ltr"; urgentWord?: string;
+  } | null {
+    const p = this.points.get(pointId);
+    if (!p || this.archived.has(pointId)) return null;
+    return {
+      kind: p.kind, speaker: p.speaker_name, text: p.text, quote: p.quote,
+      quoteDir: quoteDirection(p.quote),
+      urgentWord: p.urgency === "urgent" ? ["Urgent", p.why].filter(Boolean).join(" · ") : undefined, // plain text only, no bubble mark
+    };
+  }
+
+  /** Caption text for a tile: mic words on the self tile, tab words on the speaking tile. */
+  caption(tileId: string): string {
+    const self = this.tiles.get(tileId)?.is_self;
+    return (self ? this.captions.mic : tileId === this.speakingTile ? this.captions.tab : "");
+  }
+
+  render(doc: DocLike, root: El & { children?: El[] }, _now?: number): void {
+    for (const [tileId, layer] of this.layers) {
+      if (this.tiles.has(tileId)) continue;
+      layer.remove(); // the tile left the call (or the call ended)
+      this.layers.delete(tileId);
+    }
+    for (const tileId of this.tileOrder) {
+      let layer = this.layers.get(tileId);
+      if (!layer) {
+        layer = doc.createElement("div");
+        layer.setAttribute("data-tile-id", tileId);
+        this.layers.set(tileId, layer);
+        root.appendChild(layer);
+      }
+      // Clear by removing nodes: on a real Element, `children` is a
+      // getter-only HTMLCollection, so assigning it throws (strict mode).
+      const detach = (el: El & { children?: El[] }) => {
+        while (el.children && el.children.length > 0) el.children[0].remove();
+      };
+      detach(layer as El & { children?: El[] });
+      const tileRect = this.tiles.get(tileId)?.rect;
+      if (tileRect) {
+        // The layer sits on its tile; stack/name offsets are tile-local.
+        layer.style.setProperty("position", "absolute");
+        layer.style.setProperty("left", `${tileRect[0]}px`);
+        layer.style.setProperty("top", `${tileRect[1]}px`);
+        layer.style.setProperty("width", `${tileRect[2]}px`);
+        layer.style.setProperty("height", `${tileRect[3]}px`);
+      }
+      const layout = this.layout(tileId);
+      const name = doc.createElement("span");
+      name.classList.add("halo-name");
+      name.textContent = this.tiles.get(tileId)?.name ?? "";
+      name.style.setProperty("left", `${layout.namePos.x}px`);
+      name.style.setProperty("top", `${layout.namePos.y}px`);
+      if (layout.mode === "face") name.style.setProperty("transform", "translate(-50%, -100%)");
+      if (this.show.names) layer.appendChild(name);
+      const stack = doc.createElement("div");
+      stack.classList.add("halo-stack");
+      // DECISIONS 1: in face mode each bubble's tail points back at the face.
+      if (layout.side) stack.classList.add(layout.side === "right" ? "halo-tail-l" : "halo-tail-r");
+      stack.style.setProperty("left", `${layout.stackPos.x}px`);
+      stack.style.setProperty("top", `${layout.stackPos.y}px`);
+      layer.appendChild(stack);
+      if (this.hidden || !this.show.points) continue;
+      const words = this.caption(tileId);
+      if (words) {
+        // ponytail: the caption is not counted in the captions-floor fit rule
+        const cap = doc.createElement("div");
+        cap.classList.add("halo-caption");
+        cap.setAttribute("dir", "auto");
+        cap.textContent = words;
+        stack.appendChild(cap);
+      }
+      for (const stored of this.visiblePoints(tileId)) {
+        if (!stored.el) {
+          stored.el = doc.createElement("button");
+          stored.el.setAttribute("data-point-id", stored.point_id);
+        }
+        const chip = stored.el;
+        chip.setAttribute("lang", stored.lang);
+        chip.setAttribute("dir", stored.lang === "ar" ? "rtl" : "ltr");
+        chip.classList.add("halo-chip");
+        chip.textContent = "";
+        const mark = doc.createElement("span");
+        mark.classList.add("halo-kind");
+        mark.textContent = KIND_GLYPHS[stored.kind] ?? "";
+        chip.appendChild(mark);
+        for (const u of ["urgent", "medium", "later"]) chip.classList.toggle(`halo-chip-${u}`, stored.urgency === u);
+        if (stored.urgency) {
+          const urg = doc.createElement("span");
+          const words = this.urgencyStyle === "words";
+          urg.classList.add(words ? "halo-utab" : "halo-useal");
+          urg.classList.add(`halo-u-${stored.urgency}`);
+          urg.textContent = words
+            ? URGENCY_WORDS[stored.lang === "ar" ? "ar" : "en"][stored.urgency]
+              + (stored.urgency === "urgent" && stored.why ? ` · ${stored.why}` : "") // "Urgent · today"
+            : URGENCY_GLYPHS[stored.urgency];
+          chip.appendChild(urg);
+        }
+        const label = doc.createElement("span");
+        label.textContent = stored.text;
+        chip.appendChild(label);
+        stack.appendChild(chip);
+      }
+      const overflow = this.overflowCount(tileId);
+      const canFold = this.expanded.has(tileId)
+        && this.live(tileId).length > this.maxVisible(tileId, true);
+      if (overflow > 0 || canFold) {
+        let el = this.overflowEls.get(tileId);
+        if (!el) {
+          el = doc.createElement("button");
+          el.classList.add("halo-more");
+          el.setAttribute("data-expand-tile", tileId);
+          this.overflowEls.set(tileId, el);
+        }
+        el.textContent = canFold ? "Less" : `+${overflow}`;
+        el.setAttribute("aria-label", canFold ? "Show fewer points" : `Show ${overflow} more points`);
+        stack.appendChild(el);
+      }
+    }
+  }
+}

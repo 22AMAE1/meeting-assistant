@@ -1,0 +1,272 @@
+import { describe, expect, it, vi } from "vitest";
+import {
+  adaptAudioContext,
+  startLiveCapture,
+  type AudioContextLike,
+  type LiveCaptureDeps,
+  type MediaDevicesLike,
+  type ProcessorNode,
+} from "./capture_live";
+
+function sineChunk(length: number, rate: number, freq: number, phase: number): Float32Array {
+  const out = new Float32Array(length);
+  for (let i = 0; i < length; i += 1) out[i] = 0.5 * Math.sin((2 * Math.PI * freq * (i + phase)) / rate);
+  return out;
+}
+
+interface FakeProc extends ProcessorNode {
+  fire(channels: Float32Array[]): void;
+  connectedTo: unknown[];
+}
+
+function fakeProc(): FakeProc {
+  const connectedTo: unknown[] = [];
+  const proc: FakeProc = {
+    connectedTo,
+    onaudioprocess: null,
+    connect: (node: unknown) => { connectedTo.push(node); },
+    fire: (channels: Float32Array[]) => {
+      proc.onaudioprocess?.({
+        inputBuffer: {
+          numberOfChannels: channels.length,
+          getChannelData: (i: number) => channels[i],
+        },
+      });
+    },
+  };
+  return proc;
+}
+
+interface FakeCtx extends AudioContextLike {
+  procs: FakeProc[];
+  closed: boolean;
+  sources: { connect: (n: unknown) => void; connected: unknown[] }[];
+}
+
+function fakeContext(): FakeCtx {
+  const ctx: FakeCtx = {
+    sampleRate: 48000,
+    destination: { tag: "destination" },
+    procs: [],
+    closed: false,
+    close: async () => { ctx.closed = true; },
+    sources: [],
+    createMediaStreamSource: (_stream: MediaStream) => {
+      const connected: unknown[] = [];
+      const src = { connect: (n: unknown) => { connected.push(n); }, connected };
+      ctx.sources.push(src);
+      return src;
+    },
+    createScriptProcessor: () => {
+      const proc = fakeProc();
+      ctx.procs.push(proc);
+      return proc;
+    },
+    createGain: () => ({ gain: { value: 1 }, connect: (_n: unknown) => {} }),
+  };
+  return ctx;
+}
+
+interface FakeTrack {
+  stopped: boolean;
+  end(): void; // the source stops on its own (tab closed, mic unplugged)
+}
+
+function fakeStream(made: FakeTrack[] = []): MediaStream {
+  const onEnded: (() => void)[] = [];
+  const track = {
+    stopped: false,
+    getSettings: () => ({ channelCount: 2 }),
+    stop: () => { track.stopped = true; },
+    addEventListener: (type: string, fn: () => void) => { if (type === "ended") onEnded.push(fn); },
+    end: () => { for (const fn of onEnded) fn(); },
+  };
+  made.push(track);
+  return { getAudioTracks: () => [track] } as unknown as MediaStream;
+}
+
+function depsWith(devices: MediaDevicesLike, ctx: FakeCtx) {
+  const sent: { stream: string; bytes: number; ts: number }[] = [];
+  const micStates: string[] = [];
+  const deps: LiveCaptureDeps = {
+    mediaDevices: devices,
+    createContext: () => ctx,
+    sendAudio: (stream, pcm, tsMs) => { sent.push({ stream, bytes: pcm.byteLength, ts: tsMs }); },
+    setMicState: (s) => { micStates.push(s); },
+    now: () => 7_000,
+  };
+  return { deps, sent, micStates };
+}
+
+describe("startLiveCapture", () => {
+  it("sends tab as stream 0 and mic as stream 1, replaying only the tab", async () => {
+    const ctx = fakeContext();
+    const devices: MediaDevicesLike = { getUserMedia: async () => fakeStream() };
+    const { deps, sent, micStates } = depsWith(devices, ctx);
+    const res = await startLiveCapture("stream-id", deps);
+    expect(res).toEqual({ tab: true, mic: true });
+    expect(micStates).toEqual(["granted"]);
+    expect(ctx.procs).toHaveLength(2);
+    for (let q = 0; q < 40; q += 1) {
+      ctx.procs[0].fire([sineChunk(128, 48000, 440, q * 128), sineChunk(128, 48000, 440, q * 128)]);
+      ctx.procs[1].fire([sineChunk(128, 48000, 880, q * 128)]);
+    }
+    const tab = sent.filter((s) => s.stream === "tab");
+    const mic = sent.filter((s) => s.stream === "mic");
+    expect(tab.length).toBeGreaterThan(0);
+    expect(mic.length).toBeGreaterThan(0);
+    for (const f of [...tab, ...mic]) expect(f.bytes).toBe(3200);
+    const stamps = tab.map((f) => f.ts);
+    expect(stamps[0]).toBe(7000);
+    for (let i = 1; i < stamps.length; i += 1) expect(stamps[i] - stamps[i - 1]).toBe(100);
+    // The user keeps hearing the call (tab -> destination) but never the mic.
+    expect(ctx.sources[0].connected).toContain(ctx.destination);
+    expect(ctx.sources[1].connected).not.toContain(ctx.destination);
+  });
+
+  function isTabRequest(constraints: unknown): boolean {
+    const audio = (constraints as { audio?: { mandatory?: { chromeMediaSource?: string } } })?.audio;
+    return audio?.mandatory?.chromeMediaSource === "tab";
+  }
+
+  it("mic denied: tab continues, mic state surfaces as denied, no crash", async () => {
+    const ctx = fakeContext();
+    const devices: MediaDevicesLike = {
+      getUserMedia: async (constraints: unknown) => {
+        if (isTabRequest(constraints)) return fakeStream();
+        throw new DOMException("Permission denied", "NotAllowedError");
+      },
+    };
+    const { deps, sent, micStates } = depsWith(devices, ctx);
+    const res = await startLiveCapture("stream-id", deps);
+    expect(res).toEqual({ tab: true, mic: false });
+    expect(micStates).toEqual(["denied"]);
+    ctx.procs[0].fire([sineChunk(4800, 48000, 440, 0), sineChunk(4800, 48000, 440, 0)]);
+    expect(sent.filter((s) => s.stream === "tab")).toHaveLength(1);
+    expect(sent.some((s) => s.stream === "mic")).toBe(false);
+  });
+
+  it("no stream id (rig): skips tab capture, still tries the mic", async () => {
+    const ctx = fakeContext();
+    const getUserMedia = vi.fn(async () => fakeStream());
+    const { deps, sent } = depsWith({ getUserMedia }, ctx);
+    const res = await startLiveCapture(undefined, deps);
+    expect(res).toEqual({ tab: false, mic: true });
+    expect(getUserMedia).toHaveBeenCalledTimes(1); // mic only
+    expect(sent).toHaveLength(0); // nothing processed yet
+  });
+
+  it("abort stops every captured track; a tab closing ends the meeting, a lost mic flips the state", async () => {
+    const ctx = fakeContext();
+    const made: FakeTrack[] = [];
+    const devices: MediaDevicesLike = { getUserMedia: async () => fakeStream(made) };
+    const onTabEnded = vi.fn();
+    const { deps, micStates } = depsWith(devices, ctx);
+    const meeting = new AbortController();
+    await startLiveCapture("stream-id", { ...deps, onTabEnded, signal: meeting.signal });
+    const [tab, mic] = made;
+    mic.end(); // unplugged / revoked mid-meeting
+    expect(micStates).toEqual(["granted", "denied"]);
+    tab.end(); // the Meet tab closed
+    expect(onTabEnded).toHaveBeenCalledTimes(1);
+    meeting.abort();
+    expect(made.every((t) => t.stopped)).toBe(true);
+  });
+
+  it("after abort a late processor callback sends nothing and the context closes", async () => {
+    // Real Chromium: stopping the tracks leaves the ScriptProcessor firing
+    // with silent input; the zeros fed the next meeting's tab seq at 2x.
+    const ctx = fakeContext();
+    const { deps, sent } = depsWith({ getUserMedia: async () => fakeStream() }, ctx);
+    const meeting = new AbortController();
+    await startLiveCapture("stream-id", { ...deps, signal: meeting.signal });
+    meeting.abort();
+    for (const proc of ctx.procs) for (let i = 0; i < 4; i += 1) proc.fire([new Float32Array(4096)]);
+    expect(sent).toHaveLength(0);
+    expect(ctx.closed).toBe(true);
+  });
+
+  it("opens the mic Meet uses, falling back to the default when it is gone", async () => {
+    const ctx = fakeContext();
+    const asked: unknown[] = [];
+    const getUserMedia = async (constraints: unknown) => {
+      asked.push(constraints);
+      const audio = (constraints as { audio: unknown }).audio;
+      if (audio !== true && asked.length === 1) throw new DOMException("gone", "OverconstrainedError");
+      return fakeStream();
+    };
+    const { deps } = depsWith({ getUserMedia }, ctx);
+    expect(await startLiveCapture(undefined, deps, { mic: true, micDeviceId: "headset-id" }))
+      .toEqual({ tab: false, mic: true });
+    expect(asked).toEqual([{ audio: { deviceId: { exact: "headset-id" } } }, { audio: true }]);
+  });
+
+  it("reports the opened mic's label with the granted state", async () => {
+    const ctx = fakeContext();
+    const stream = fakeStream();
+    (stream.getAudioTracks()[0] as unknown as { label: string }).label = "Microphone (Arctis Nova Pro Wireless)";
+    const labels: (string | undefined)[] = [];
+    const { deps } = depsWith({ getUserMedia: async () => stream }, ctx);
+    deps.setMicState = (_s, label) => { labels.push(label); };
+    await startLiveCapture(undefined, deps);
+    expect(labels).toEqual(["Microphone (Arctis Nova Pro Wireless)"]);
+  });
+
+  it("hub side (mic: false): taps only the tab, never asks for the mic", async () => {
+    const ctx = fakeContext();
+    const getUserMedia = vi.fn(async () => fakeStream());
+    const { deps, micStates } = depsWith({ getUserMedia }, ctx);
+    const res = await startLiveCapture("stream-id", deps, { mic: false });
+    expect(res).toEqual({ tab: true, mic: false });
+    expect(getUserMedia).toHaveBeenCalledTimes(1); // tab only
+    expect(micStates).toEqual([]);
+  });
+
+  it("tab capture failing (rig): meeting proceeds without audio", async () => {
+    const ctx = fakeContext();
+    const devices: MediaDevicesLike = {
+      getUserMedia: async (constraints: unknown) => {
+        if (isTabRequest(constraints)) {
+          throw new DOMException("no capture device", "NotFoundError");
+        }
+        return fakeStream();
+      },
+    };
+    const { deps } = depsWith(devices, ctx);
+    await expect(startLiveCapture("stream-id", deps)).resolves.toEqual({ tab: false, mic: true });
+  });
+});
+
+describe("adaptAudioContext", () => {
+  it("connects real nodes, never the wrappers (live: 'Overload resolution failed')", () => {
+    const realNodes = new Set<object>();
+    const node = (extra: object = {}) => {
+      const n: Record<string, unknown> = {
+        ...extra,
+        connect: (target: unknown) => {
+          if (!realNodes.has(target as object)) throw new TypeError("Overload resolution failed.");
+        },
+      };
+      realNodes.add(n);
+      return n;
+    };
+    const destination = node();
+    const ctx = {
+      sampleRate: 48000,
+      destination,
+      createMediaStreamSource: () => node(),
+      createScriptProcessor: () => node({ onaudioprocess: null }),
+      createGain: () => node({ gain: { value: 1 } }),
+    } as unknown as AudioContext;
+    const like = adaptAudioContext(ctx);
+    const source = like.createMediaStreamSource({} as MediaStream);
+    const proc = like.createScriptProcessor(4096, 2, 2);
+    const sink = like.createGain();
+    expect(() => {
+      source.connect(like.destination);
+      source.connect(proc);
+      proc.connect(sink);
+      sink.connect(like.destination);
+    }).not.toThrow();
+  });
+});

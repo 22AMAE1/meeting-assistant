@@ -1,0 +1,44 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# python
+__pycache__/
+*.pyc
+.venv/
+.venv-sam/
+.pytest_cache/
+.tmp/
+.uv-cache/
+
+# node / wxt
+node_modules/
+.output/
+.wxt/
+
+# local user data (meetings, recordings, logs)
+data/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.db
+*.db-wal
+*.db-shm
+recordings/
+
+# recorded test calls stay local
+rig/fixtures/*/
+!rig/fixtures/synthetic/
+
+# local caches and test output
+brag-output/
+.playwright-mcp/
+.pw-browsers/
+test-results/
+.npm-cache/
+pytest-of-*/
+
+# design-skill working files (local only)
+.taste-skill/
+dist/

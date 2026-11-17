@@ -1,0 +1,40 @@
+# gateway: STATE
+
+## Goal
+Implement gateway per its PLAN.md; done ONLY when `uv run pytest backend/halo/gateway -q` passes and the contract tests for gateway pass.
+
+## Key decisions
+- `PairingStore`: one single-use 6-digit code in memory (fresh per backend start); issued tokens persisted as sha256 hashes in `data/pairing.json` (`HALO_DATA_DIR` overrides). Restart mints a new code; old tokens keep working; the spent code stays spent because only the current code validates.
+- `POST /pair/auto -> 200 {token}` only when Origin is the pinned extension (`Gateway.origin_ok`), else 403; `PairingStore.issue()` mints it (Karim 2026-11-04, automatic pairing).
+- `POST /pair {code} -> 200 {token}`; wrong/used code 401; malformed body (not a 6-digit string) 400 — the issue #5 ruling, implemented exactly.
+- `SocketSession` (transport-free): pairing gate first (`pair.hello` only), then `unpaired`, `unknown_type`, `invalid_schema` (contracts `validate_envelope`), gateway-global id dedupe (survives reconnects; the Event Store UNIQUE is the second line), then `bus.publish`; the socket ACK mirrors the bus ack. `pair.hello` is answered by a `pair.ok`/`pair.rejected` envelope, never an ACK frame. Real sockets stay a thin loop in the router (no `websockets` test package here; L2 replay covers the wire).
+- Origin check is exact-match `chrome-extension://<id>` with the id from `HALO_EXTENSION_ID`; default empty rejects all (closed until hub_capture publishes the pinned id — issue #27).
+- `AudioRouter`: kind=1 to the tab/mic queues, kind=3 to rec, kind=2 rejected. Seq gaps are silence-padded (3200 zero bytes = 100 ms @16 kHz mono) capped at 300 frames (30 s bound), then resync; late frames dropped; full queues drop-newest. Items are `(seq, ts_ms, payload)` tuples.
+- `system.status` is built from `bus.health()` (missing services read down/unknown), published on the bus (so the Event Store tap sees it) and broadcast to paired sockets every 5 s and on change.
+- `meeting.ended` timeout: 60 s after the last socket drops with no hub `meeting.ended` on the bus, exactly one `reason: timeout` envelope per meeting (new id) via `bus.publish`.
+- No schema slot exists in `system.status` for an audio-gap warn, so gaps surface as logs + the gateway health counters, not in the status payload (noted for Karim in the PR).
+- Restart catch-up (issue #57): on every `pair.ok` the Gateway reads `events.sqlite` (read-only) for the newest `meeting.started` with no `meeting.ended` and republishes it plus that meeting's latest `meeting.context` under their original ids, so Transcriber/Correlator/Recorder resume the same meeting. Ids go through the gateway dedupe, so it runs once per process and never when the hub already sent that started here. Limit: `pair.hello` has no meetingid and events no client id, so "open" is global (one user, one hub); a meeting orphaned by a crash is replayed on the next `pair.ok` until it ends (the 60 s no-socket timeout now covers it, since the replay feeds `_note_started`) or a newer meeting starts.
+- `app.py` keeps only mechanical mount lines (construct `Gateway`, `include_router`, register host middleware); all logic moved here.
+
+## Task graph
+1. [x] `pairing.py` + restart-persistence tests (PLAN 4b)
+2. [x] `session.py` + contracts ACK-kit tests (PLAN 1-3)
+3. [x] `audio.py` + routing/gap tests (PLAN 5)
+4. [x] `gateway.py` (router, Host/Origin, status loop, timeout ended) + HTTP/status/timeout tests (PLAN 4, 6, 7); `app.py` move
+5. [x] Full suite green (23 tests) + ruff/mypy/lint-imports; PR open for Karim to merge
+
+## File map
+- `backend/halo/gateway/pairing.py` — code/token store
+- `backend/halo/gateway/session.py` — per-socket envelope handling + ACK/dedupe
+- `backend/halo/gateway/audio.py` — binary frame routing
+- `backend/halo/gateway/gateway.py` — `Gateway`, `router`, Host/Origin checks, status + timeout
+- `backend/halo/gateway/__init__.py` — re-exports
+- `backend/halo/gateway/tests/` — the PLAN suite
+- `backend/halo/app.py` — composition-root mount lines (allowed exception)
+
+## Current step
+Follow-up on branch `module/gateway-origin`: #27 resolved with the pinned id, now the default.
+
+## Open questions
+- Resolved #27: pinned id `dbngpodihegmipdmikpbkflahdkfpgif` (Karim's comment; source of truth stays the manifest key in `wxt.config.ts`) is now `PINNED_EXTENSION_ID` and the default when `HALO_EXTENSION_ID` is unset; explicit env still overrides. The temporary any-origin fallback is removed — the check is exact-match only. Assumption for Karim: no any-origin fallback retained; say so if a dev-mode escape hatch is wanted.
+- Audio-gap warn has no `system.status` schema slot; surfaced via logs + health counters until Karim says otherwise.

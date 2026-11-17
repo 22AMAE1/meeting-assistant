@@ -1,0 +1,578 @@
+import { sourceLink } from "./overlay";
+import { describe, expect, it } from "vitest";
+import {
+  FakeClock,
+  Overlay,
+  projectFaceBox,
+  type El,
+  type PointUpsert,
+} from "./overlay";
+
+// Minimal fake DOM: the renderer only uses createElement/textContent/
+// setAttribute/appendChild/remove/classList, exactly the Trusted-Types-safe set.
+class FakeEl implements El {
+  children: FakeEl[] = [];
+  attrs = new Map<string, string>();
+  classes = new Set<string>();
+  text = "";
+  parent: FakeEl | null = null;
+  style = { setProperty: (k: string, v: string) => this.attrs.set(`style:${k}`, v) };
+  classList = {
+    add: (c: string) => this.classes.add(c),
+    toggle: (c: string, on?: boolean) => (on === false ? this.classes.delete(c) : this.classes.add(c)),
+    contains: (c: string) => this.classes.has(c),
+  };
+  set textContent(v: string) { this.text = v; this.children = []; }
+  get textContent(): string { return this.text + this.children.map((c) => c.textContent).join(""); }
+  setAttribute(k: string, v: string): void { this.attrs.set(k, v); }
+  appendChild(c: FakeEl): FakeEl { c.parent = this; this.children.push(c); return c; }
+  remove(): void { if (this.parent) this.parent.children = this.parent.children.filter((x) => x !== this); }
+  find(pred: (e: FakeEl) => boolean): FakeEl[] {
+    return [...(pred(this) ? [this] : []), ...this.children.flatMap((c) => c.find(pred))];
+  }
+}
+const doc = { createElement: () => new FakeEl() };
+
+// Real-DOM-shaped element: `children` is a getter-only accessor (as on a
+// real Element), so assigning `el.children = []` throws in strict mode.
+// Regression seam for the joined gate: render() must clear a layer by
+// removing child nodes, never by assigning children.
+class RealishEl implements El {
+  private kids: RealishEl[] = [];
+  attrs = new Map<string, string>();
+  classes = new Set<string>();
+  text = "";
+  parent: RealishEl | null = null;
+  style = { setProperty: (k: string, v: string) => this.attrs.set(`style:${k}`, v) };
+  classList = {
+    add: (c: string) => this.classes.add(c),
+    toggle: (c: string, on?: boolean) => (on === false ? this.classes.delete(c) : this.classes.add(c)),
+    contains: (c: string) => this.classes.has(c),
+  };
+  get children(): RealishEl[] { return this.kids; }
+  set textContent(v: string) { this.text = v; this.kids.length = 0; }
+  get textContent(): string { return this.text + this.kids.map((c) => c.textContent).join(""); }
+  setAttribute(k: string, v: string): void { this.attrs.set(k, v); }
+  appendChild(c: RealishEl): RealishEl { c.parent = this; this.kids.push(c); return c; }
+  remove(): void {
+    if (this.parent) {
+      const i = this.parent.kids.indexOf(this);
+      if (i >= 0) this.parent.kids.splice(i, 1);
+    }
+  }
+  find(pred: (e: RealishEl) => boolean): RealishEl[] {
+    return [...(pred(this) ? [this] : []), ...this.kids.flatMap((c) => c.find(pred))];
+  }
+}
+const realishDoc = { createElement: () => new RealishEl() };
+
+let n = 0;
+function point(over: Partial<PointUpsert> = {}): PointUpsert {
+  n += 1;
+  return {
+    point_id: `pt-${n}`, tile_id: "tile-1", speaker_name: "Layla", kind: "point",
+    text: `point ${n}`, lang: "en", quote: "original quote", turn_ids: ["t-1"],
+    rank: 1, attribution: "provisional", is_action: false, engine: "spark-open", ...over,
+  };
+}
+function make(now = 0) {
+  const clock = new FakeClock(now);
+  const overlay = new Overlay(clock);
+  overlay.applyTiles({ tiles: [{ tile_id: "tile-1", name: "Layla", is_self: false, rect: [0, 0, 400, 225], video_w: 640, video_h: 360, fit: "cover", captions_rect: null }] });
+  return { overlay, clock };
+}
+
+// (1) Frame mode pins name + stack inside the tile; Face projection math
+describe("layout", () => {
+  it("frame mode pins inside the tile and face mode projects the box", () => {
+    const { overlay } = make();
+    const layout = overlay.layout("tile-1");
+    expect(layout.mode).toBe("frame");
+    expect(layout.namePos).toEqual({ x: 10, y: 10 });
+    expect(layout.stackPos.x).toBe(10);
+    const tile = { rect: [100, 50, 400, 225], video_w: 640, video_h: 360, fit: "cover" as const, is_self: false };
+    const box = projectFaceBox(tile, [0.25, 0.2, 0.2, 0.4]);
+    expect(box.x).toBeGreaterThan(100);
+    expect(box.y).toBeGreaterThan(50);
+    const flipped = projectFaceBox({ ...tile, is_self: true }, [0.25, 0.2, 0.2, 0.4]);
+    expect(flipped.x).toBeGreaterThan(box.x); // mirrored self tile flips x
+  });
+
+  it("face mode positions are tile-local: the tile's layer already sits at the tile", () => {
+    const clock = new FakeClock(0);
+    const overlay = new Overlay(clock);
+    const tile = { tile_id: "t", name: "Karim", is_self: false, rect: [238, 64, 1388, 781] as number[],
+      video_w: 1280, video_h: 720, fit: "contain" as const, captions_rect: [600, 853, 600, 80] as number[] };
+    overlay.applyTiles({ tiles: [tile] });
+    overlay.applyFaces({ tile_id: "t", frame_ts_ms: 0, engine: "sam", space: { frame_w: 1280, frame_h: 720 },
+      face: { box: [0.4, 0.4, 0.15, 0.35], head_anchor: [0.475, 0.4], conf: 0.9 } });
+    const layout = overlay.layout("t");
+    const page = projectFaceBox(tile, [0.4, 0.4, 0.15, 0.35]);
+    expect(layout.mode).toBe("face");
+    expect(layout.namePos.x).toBeCloseTo(page.x + page.w / 2 - 238);
+    // Live 2026-11-04: the box starts at the brow, so the pill clears the hair too.
+    expect(layout.namePos.y).toBeCloseTo(page.y - 0.35 * page.h - 6 - 64);
+    expect(layout.stackPos.y).toBeCloseTo(page.y - 64);
+    expect(layout.floorY).toBe(853 - 64);
+    // DECISIONS 1: bubbles carry a tail toward the face; room on the right puts the
+    // stack right of the face, so the tail is on the stack's left.
+    expect(layout.side).toBe("right");
+    overlay.applyFaces({ tile_id: "t", frame_ts_ms: 1, engine: "sam", space: { frame_w: 1280, frame_h: 720 },
+      face: { box: [0.8, 0.4, 0.15, 0.35], head_anchor: [0.875, 0.4], conf: 0.9 } });
+    expect(overlay.layout("t").side).toBe("left");
+    expect(make().overlay.layout("tile-1").side).toBeUndefined(); // frame mode: no tail
+  });
+});
+
+// Joined-gate regression: render against a real-DOM-shaped tree (getter-
+// only children) must not throw and must render every tile's chip.
+describe("render on a real-DOM-shaped tree", () => {
+  it("renders layers and chips for all tiles without assigning children", () => {
+    const clock = new FakeClock(0);
+    const overlay = new Overlay(clock);
+    overlay.applyTiles({
+      tiles: [
+        { tile_id: "tile-1", name: "Karim", is_self: true, rect: [0, 0, 400, 225], video_w: 640, video_h: 360, fit: "cover", captions_rect: null },
+        { tile_id: "tile-2", name: "Layla", is_self: false, rect: [408, 0, 400, 225], video_w: 640, video_h: 360, fit: "cover", captions_rect: null },
+      ],
+    });
+    overlay.applyPointsUpsert(point({ tile_id: "tile-2", text: "Launch moves to Nov 12" }), "env-1");
+    const root = new RealishEl();
+    overlay.render(realishDoc as never, root as never);
+    overlay.render(realishDoc as never, root as never); // second render clears, not throws
+    const layers = root.find((e) => e.attrs.has("data-tile-id"));
+    expect(layers.map((l) => l.attrs.get("data-tile-id"))).toEqual(["tile-1", "tile-2"]);
+    const chips = root.find((e) => e.attrs.has("data-point-id"));
+    expect(chips).toHaveLength(1);
+    expect(chips[0].textContent).toContain("Launch moves to Nov 12");
+  });
+});
+
+// (2) correction in place, replaces removes; (3) user tag wins over model
+describe("point lifecycle", () => {
+  it("correction reuses the same element and replaces removes the old", () => {
+    const { overlay } = make();
+    const root = new FakeEl();
+    const p = point();
+    overlay.applyPointsUpsert(p, "env-1");
+    overlay.render(doc as never, root as never, 0);
+    const before = root.find((e) => e.attrs.get("data-point-id") === p.point_id);
+    expect(before).toHaveLength(1);
+    overlay.applyPointsUpsert({ ...p, text: "corrected text" }, "env-2");
+    overlay.render(doc as never, root as never, 10);
+    const after = root.find((e) => e.attrs.get("data-point-id") === p.point_id);
+    expect(after[0]).toBe(before[0]);
+    expect(after[0].textContent).toContain("corrected text");
+    const newer = point({ replaces: p.point_id });
+    overlay.applyPointsUpsert(newer, "env-3");
+    expect(overlay.points.has(p.point_id)).toBe(false);
+  });
+
+  it("a model tag after a user tag is ignored", () => {
+    const { overlay } = make();
+    const p = point();
+    overlay.applyPointsUpsert(p, "env-1");
+    overlay.applyTagsSet({ target: "point", target_id: p.point_id, kind: "decision", source: "user" });
+    overlay.applyTagsSet({ target: "point", target_id: p.point_id, kind: "point", source: "model", model: "m" });
+    expect(overlay.points.get(p.point_id)?.kind).toBe("decision");
+  });
+});
+
+// (4) Karim 2026-11-04, live: points stay until he archives them; overflow folds to +N
+describe("staying and folding", () => {
+  it("keeps every point until archived, newest in view, the rest behind +N", () => {
+    const { overlay, clock } = make();
+    const pts = [point({ rank: 1 }), point({ rank: 2 }), point({ rank: 3 }), point({ rank: 3 })];
+    pts.forEach((p, i) => {
+      clock.now = i * 1000;
+      overlay.applyPointsUpsert(p, `env-${i}`);
+    });
+    expect(overlay.visiblePoints("tile-1").map((p) => p.point_id)).toHaveLength(3);
+    expect(overlay.visiblePoints("tile-1")[0].point_id).toBe(pts[3].point_id);
+    expect(overlay.overflowCount("tile-1")).toBe(1);
+    clock.now = 60 * 60_000; // an hour later, nothing has gone
+    expect(overlay.visiblePoints("tile-1")).toHaveLength(3);
+    expect(overlay.overflowCount("tile-1")).toBe(1);
+    overlay.archive(pts[3].point_id);
+    expect(overlay.overflowCount("tile-1")).toBe(0);
+  });
+});
+
+// Review fix: captions floor — a bubble's bottom never goes below
+// captions_rect's top edge (null = no floor)
+describe("captions floor", () => {
+  it("folds bubbles that would cross the captions top edge", () => {
+    const { overlay } = make();
+    overlay.applyTiles({ tiles: [{ tile_id: "tile-1", name: "Layla", is_self: false, rect: [0, 0, 400, 225], video_w: 640, video_h: 360, fit: "cover", captions_rect: [0, 100, 400, 40] }] });
+    const pts = [point({ rank: 1 }), point({ rank: 2 }), point({ rank: 3 })];
+    pts.forEach((p, i) => overlay.applyPointsUpsert(p, `env-c${i}`));
+    expect(overlay.layout("tile-1").floorY).toBe(100);
+    expect(overlay.visiblePoints("tile-1")).toHaveLength(1); // only the first fits above y=100
+    expect(overlay.overflowCount("tile-1")).toBe(2);
+    expect(overlay.bubbleBottom("tile-1")).toBeLessThanOrEqual(100);
+  });
+
+  it("null captions_rect means no floor: the normal cap applies", () => {
+    const { overlay } = make(); // make() uses captions_rect: null
+    const pts = [point({ rank: 1 }), point({ rank: 2 }), point({ rank: 3 })];
+    pts.forEach((p, i) => overlay.applyPointsUpsert(p, `env-n${i}`));
+    expect(overlay.layout("tile-1").floorY).toBeNull();
+    expect(overlay.visiblePoints("tile-1")).toHaveLength(3);
+    expect(overlay.overflowCount("tile-1")).toBe(0);
+  });
+});
+
+// (5) thinking sweep, (6) Alt+H, (9) Arabic pill attrs
+describe("thinking, hide, language", () => {
+  it("thinking runs from speaker pause until a point lands or 5 s pass", () => {
+    const { overlay, clock } = make();
+    overlay.applySpeakerActive({ tile_id: "tile-1", speaking: true, ts_ms: 0 });
+    clock.now = 1000;
+    overlay.applySpeakerActive({ tile_id: "tile-1", speaking: false, ts_ms: 1000 });
+    expect(overlay.thinking("tile-1", false)).toBe("sweep");
+    expect(overlay.thinking("tile-1", true)).toBe("dotted"); // reduced motion
+    clock.now = 7000;
+    expect(overlay.thinking("tile-1", false)).toBe(null);
+  });
+
+  it("Alt+H toggles layers; Ctrl+Alt+H passes through; repeat ignored", () => {
+    const { overlay } = make();
+    expect(overlay.handleKey({ altKey: true, ctrlKey: false, key: "h", repeat: false })).toBe(true);
+    expect(overlay.hidden).toBe(true);
+    expect(overlay.badgeText()).toBe("Halo · hidden");
+    expect(overlay.handleKey({ altKey: true, ctrlKey: true, key: "h", repeat: false })).toBe(false);
+    expect(overlay.handleKey({ altKey: true, ctrlKey: false, key: "h", repeat: true })).toBe(true);
+    expect(overlay.hidden).toBe(true);
+  });
+
+  it("an Arabic point renders lang=ar dir=rtl", () => {
+    const { overlay } = make();
+    const root = new FakeEl();
+    overlay.applyPointsUpsert(point({ lang: "ar", text: "نقطة عربية" }), "env-1");
+    overlay.render(doc as never, root as never, 0);
+    const chip = root.find((e) => e.attrs.has("data-point-id"))[0];
+    expect(chip.attrs.get("lang")).toBe("ar");
+    expect(chip.attrs.get("dir")).toBe("rtl");
+  });
+});
+
+// (7) popover model; (8) consent copy touches only the clipboard
+describe("popover and consent", () => {
+  it("an urgent point shows its why: Urgent · today", () => {
+    const { overlay } = make();
+    const p = point({ urgency: "urgent", why: "today" });
+    overlay.applyPointsUpsert(p, "env-why");
+    expect(overlay.popover(p.point_id)?.urgentWord).toBe("Urgent · today");
+    const root = new FakeEl();
+    overlay.render(doc as never, root as never, 0);
+    expect(root.find((e) => e.classes.has("halo-utab"))[0]?.textContent).toMatch(/· today$/);
+  });
+
+  it("urgent shows plain-text Urgent in the popover (bubble marks are covered below)", () => {
+    const { overlay } = make();
+    const p = point({ urgency: "urgent", kind: "decision" });
+    overlay.applyPointsUpsert(p, "env-1");
+    const pop = overlay.popover(p.point_id);
+    expect(pop?.urgentWord).toBe("Urgent");
+    expect(pop?.quoteDir).toBe("ltr");
+    const root = new FakeEl();
+    overlay.render(doc as never, root as never, 0);
+    const chip = root.find((e) => e.attrs.has("data-point-id"))[0];
+    expect(chip.attrs.has("data-urgency-mark")).toBe(false);
+  });
+});
+
+// Karim 2026-11-02: the +N chip opens the folded points; "Less" folds them back.
+describe("expand +N", () => {
+  it("a +N toggle shows every live point on that tile, then folds back", () => {
+    const { overlay } = make();
+    for (let i = 0; i < 5; i += 1) overlay.applyPointsUpsert(point());
+    const root = new FakeEl();
+    const chips = () => root.find((e) => e.attrs.has("data-point-id")).length;
+    const toggle = () => root.find((e) => e.attrs.get("data-expand-tile") === "tile-1")[0];
+    overlay.render(doc as never, root as never, 0);
+    expect(chips()).toBe(3);
+    expect(toggle().textContent).toBe("+2");
+    overlay.toggleExpanded("tile-1");
+    overlay.render(doc as never, root as never, 0);
+    expect(chips()).toBe(5);
+    expect(toggle().textContent).toBe("Less");
+    overlay.toggleExpanded("tile-1");
+    overlay.render(doc as never, root as never, 0);
+    expect(chips()).toBe(3);
+  });
+});
+
+// Urgency mark (DECISIONS: draft-2 word tabs by default, draft-1 shape seals
+// via the `halo.urgencyStyle` viewer setting). Tabs carry the word in the
+// bubble's language; seals carry ! (urgent), = (medium), or nothing (later).
+function marksOf(root: FakeEl): FakeEl[] {
+  return root.find((e) => e.classes.has("halo-utab") || e.classes.has("halo-useal"));
+}
+
+describe("urgency mark", () => {
+  it("words style (default): tab words per urgency in English", () => {
+    const { overlay } = make();
+    const root = new FakeEl();
+    const ids = ["urgent", "medium", "later"] as const;
+    const words = ["URGENT", "MEDIUM", "LATER"];
+    ids.forEach((urgency, i) => overlay.applyPointsUpsert(point({ urgency, rank: i + 1 }), `env-u${i}`));
+    overlay.render(doc as never, root as never, 0);
+    const marks = marksOf(root);
+    expect(marks).toHaveLength(3);
+    marks.forEach((m, i) => {
+      expect(m.classes.has("halo-utab")).toBe(true);
+      expect(m.classes.has(`halo-u-${ids[i]}`)).toBe(true);
+      expect(m.textContent).toBe(words[i]);
+    });
+  });
+
+  it("words style: Arabic bubble gets the Arabic word", () => {
+    const { overlay } = make();
+    const root = new FakeEl();
+    overlay.applyPointsUpsert(point({ urgency: "urgent", lang: "ar", rank: 1 }), "env-a");
+    overlay.applyPointsUpsert(point({ urgency: "later", lang: "en", rank: 2 }), "env-m");
+    overlay.render(doc as never, root as never, 0);
+    const marks = marksOf(root);
+    expect(marks.map((m) => m.textContent)).toEqual(["عاجل", "LATER"]);
+  });
+
+  it("symbols style: seals with glyphs, later seal empty", () => {
+    const { overlay } = make();
+    overlay.setUrgencyStyle("symbols");
+    const root = new FakeEl();
+    (["urgent", "medium", "later"] as const).forEach((urgency, i) =>
+      overlay.applyPointsUpsert(point({ urgency, rank: i + 1 }), `env-s${i}`));
+    overlay.render(doc as never, root as never, 0);
+    const marks = marksOf(root);
+    expect(marks).toHaveLength(3);
+    expect(marks.map((m) => m.textContent)).toEqual(["!", "=", ""]);
+    marks.forEach((m) => expect(m.classes.has("halo-useal")).toBe(true));
+    expect(marks[2].classes.has("halo-u-later")).toBe(true);
+  });
+
+  it("live switch: setUrgencyStyle swaps tabs for seals on re-render", () => {
+    const { overlay } = make();
+    const root = new FakeEl();
+    overlay.applyPointsUpsert(point({ urgency: "medium" }), "env-1");
+    overlay.render(doc as never, root as never, 0);
+    expect(marksOf(root)[0].textContent).toBe("MEDIUM");
+    overlay.setUrgencyStyle("symbols");
+    overlay.render(doc as never, root as never, 0);
+    const marks = marksOf(root);
+    expect(marks).toHaveLength(1);
+    expect(marks[0].classes.has("halo-useal")).toBe(true);
+    expect(marks[0].textContent).toBe("=");
+    overlay.setUrgencyStyle("words");
+    overlay.render(doc as never, root as never, 0);
+    expect(marksOf(root)[0].textContent).toBe("MEDIUM");
+  });
+
+  it("RTL: an Arabic bubble carries its mark with dir=rtl", () => {
+    const { overlay } = make();
+    const root = new FakeEl();
+    overlay.applyPointsUpsert(point({ urgency: "urgent", lang: "ar" }), "env-1");
+    overlay.render(doc as never, root as never, 0);
+    const chip = root.find((e) => e.attrs.has("data-point-id"))[0];
+    expect(chip.attrs.get("dir")).toBe("rtl");
+    expect(marksOf(chip as unknown as FakeEl)).toHaveLength(1);
+    overlay.setUrgencyStyle("symbols");
+    overlay.render(doc as never, root as never, 0);
+    expect(marksOf(root)[0].classes.has("halo-useal")).toBe(true);
+  });
+
+  it("points without urgency render no mark; bad styles are ignored", () => {
+    const { overlay } = make();
+    const root = new FakeEl();
+    overlay.applyPointsUpsert(point(), "env-1");
+    overlay.render(doc as never, root as never, 0);
+    expect(marksOf(root)).toHaveLength(0);
+    overlay.setUrgencyStyle("bogus");
+    expect(overlay.urgencyStyle).toBe("words");
+  });
+});
+
+// Live 2026-11-01 (Karim): urgent points vanished after a minute; they must
+// stay until handled. Colour means urgency only; kind is a glyph.
+describe("urgent points stick until archived", () => {
+  it("an urgent point outlives the lifetime and leads the stack; archive removes it", () => {
+    const { overlay, clock } = make();
+    overlay.applyPointsUpsert(point({ point_id: "u1", urgency: "urgent", rank: 3 }), "env-s1");
+    overlay.applyPointsUpsert(point({ point_id: "m1", urgency: "medium", rank: 1 }), "env-s2");
+    expect(overlay.visiblePoints("tile-1").map((p) => p.point_id)).toEqual(["u1", "m1"]);
+    clock.now += 10 * 60_000;
+    overlay.archive("u1");
+    expect(overlay.visiblePoints("tile-1").map((p) => p.point_id)).toEqual(["m1"]);
+    expect(overlay.popover("u1")).toBeNull();
+  });
+
+  it("the kind mark is a glyph on a neutral disc, not a second colour", () => {
+    const { overlay } = make();
+    const root = new FakeEl();
+    overlay.applyPointsUpsert(point({ kind: "question", urgency: "later" }), "env-s3");
+    overlay.render(doc as never, root as never, 0);
+    const mark = root.find((e) => e.classes.has("halo-kind"))[0];
+    expect(mark.textContent).toBe("?");
+    expect(root.find((e) => e.classes.has("halo-chip-later"))).toHaveLength(1);
+  });
+});
+
+// Step 1 live caption: transcript.partial shows the words being said, at
+// the top of the speaker's stack (tab = the tile Meet last marked speaking,
+// mic = the self tile); "" clears it.
+describe("live caption", () => {
+  const partial = (id: string, stream: "tab" | "mic", text: string) =>
+    ({ id, type: "transcript.partial", data: { stream, text } });
+  const captionOf = (root: FakeEl, tileId: string) =>
+    root.find((e) => e.attrs.get("data-tile-id") === tileId)[0]
+      ?.find((e) => e.classes.has("halo-caption"))[0]?.textContent;
+
+  it("puts tab words on the last speaking tile, mic words on the self tile, and clears", () => {
+    const overlay = new Overlay(new FakeClock(0));
+    overlay.applyTiles({
+      tiles: [
+        { tile_id: "tile-1", name: "Karim", is_self: true, rect: [0, 0, 400, 225], video_w: 640, video_h: 360, fit: "cover", captions_rect: null },
+        { tile_id: "tile-2", name: "Layla", is_self: false, rect: [408, 0, 400, 225], video_w: 640, video_h: 360, fit: "cover", captions_rect: null },
+      ],
+    });
+    const root = new FakeEl();
+    overlay.applyEnvelope(partial("e1", "tab", "nobody marked yet"));
+    overlay.render(doc, root);
+    expect(captionOf(root, "tile-2")).toBeUndefined();
+
+    overlay.applySpeakerActive({ tile_id: "tile-2", speaking: true, ts_ms: 0 });
+    overlay.applySpeakerActive({ tile_id: "tile-2", speaking: false, ts_ms: 500 }); // words lag the highlight
+    overlay.applyEnvelope(partial("e2", "tab", "launch moves to"));
+    overlay.applyEnvelope(partial("e3", "mic", "my own words"));
+    overlay.applyPointsUpsert(point({ tile_id: "tile-2" }));
+    overlay.render(doc, root);
+    expect(captionOf(root, "tile-2")).toBe("launch moves to");
+    expect(captionOf(root, "tile-1")).toBe("my own words");
+    const stack = root.find((e) => e.classes.has("halo-stack") && e.parent?.attrs.get("data-tile-id") === "tile-2")[0];
+    expect(stack.children[0].classes.has("halo-caption")).toBe(true); // above the bubbles
+
+    overlay.applyEnvelope(partial("e4", "tab", ""));
+    overlay.handleKey({ altKey: true, ctrlKey: false, key: "h", repeat: false });
+    overlay.render(doc, root);
+    expect(captionOf(root, "tile-2")).toBeUndefined();
+    expect(captionOf(root, "tile-1")).toBeUndefined(); // Alt+H hides captions too
+  });
+});
+
+// Live 2026-11-04: after leaving the call, the name pill, points and coach
+// stayed on Meet's "You left the meeting" page.
+describe("the meeting ends: nothing lingers", () => {
+  it("a tile that left the snapshot loses its layer on the next render", () => {
+    const { overlay } = make();
+    overlay.applyPointsUpsert(point({ text: "Ship it" }), "env-1");
+    const root = new FakeEl();
+    overlay.render(doc as never, root as never);
+    expect(root.find((e) => e.attrs.has("data-tile-id"))).toHaveLength(1);
+    overlay.applyTiles({ tiles: [] });
+    overlay.render(doc as never, root as never);
+    expect(root.find((e) => e.attrs.has("data-tile-id"))).toHaveLength(0);
+  });
+
+  it("endMeeting clears points (urgent ones too), coach and captions, and keeps the notes toast", () => {
+    const { overlay } = make();
+    overlay.applyPointsUpsert(point({ urgency: "urgent" }), "env-1");
+    overlay.applyEnvelope({ id: "c1", type: "coach.tips", data: { tips: ["Name an owner."], lang: "en" } });
+    overlay.applyEnvelope({ id: "p1", type: "transcript.partial", data: { stream: "tab", text: "so the" } });
+    overlay.applyEnvelope({ id: "n1", type: "notes.ready", data: { meeting_id: "m" } });
+    overlay.endMeeting();
+    expect(overlay.points.size).toBe(0);
+    expect(overlay.coach).toBeNull();
+    expect(overlay.visiblePoints("tile-1")).toEqual([]);
+    expect(overlay.notesToast).not.toBeNull();
+    expect(overlay.caption("tile-1")).toBe("");
+  });
+
+  it("a point or tip still in flight when the meeting ends stays off the page until the next Start", () => {
+    const { overlay } = make();
+    overlay.endMeeting();
+    overlay.applyEnvelope({ id: "late-1", type: "points.upsert", data: point() as never });
+    overlay.applyEnvelope({ id: "late-2", type: "coach.tips", data: { tips: ["Late."], lang: "en" } });
+    overlay.applyEnvelope({ id: "late-3", type: "claim.checked", data: FACT });
+    expect(overlay.factChecks).toEqual([]);
+    expect(overlay.points.size).toBe(0);
+    expect(overlay.coach).toBeNull();
+    overlay.startMeeting();
+    overlay.applyEnvelope({ id: "new-1", type: "points.upsert", data: point() as never });
+    expect(overlay.points.size).toBe(1);
+  });
+});
+
+
+describe("view mode", () => {
+  it("Frame view keeps the name in the tile corner even when a face is found", () => {
+    const { overlay } = make();
+    overlay.applyTiles({ tiles: [{ tile_id: "tile-1", name: "Layla", is_self: false, rect: [0, 0, 800, 450], video_w: 640, video_h: 360, fit: "cover", captions_rect: null }] });
+    overlay.applyFaces({ tile_id: "tile-1", frame_ts_ms: 0, engine: "sam", space: { frame_w: 640, frame_h: 360 },
+      face: { box: [0.4, 0.4, 0.15, 0.35], head_anchor: [0.475, 0.4], conf: 0.9 } });
+    expect(overlay.layout("tile-1").mode).toBe("face");
+    overlay.setViewMode("frame");
+    expect(overlay.layout("tile-1").mode).toBe("frame");
+    overlay.setViewMode("bogus");
+    expect(overlay.layout("tile-1").mode).toBe("frame");
+    overlay.setViewMode("face");
+    expect(overlay.layout("tile-1").mode).toBe("face");
+  });
+});
+
+const FACT = { point_id: "p1", claim: "Qatar has 10 million people.", speaker_name: "Omar", verdict: "disputed",
+  note: "It is about 3.1 million.", sources: ["https://a.example/1"], lang: "en" };
+
+describe("fact check", () => {
+  it("keeps every check, newest first, until dismissed or the meeting ends", () => {
+    const overlay = new Overlay(new FakeClock());
+    overlay.applyEnvelope({ id: "f1", type: "claim.checked", data: FACT });
+    overlay.applyEnvelope({ id: "f2", type: "claim.checked", data: { ...FACT, note: "Newer." } });
+    expect(overlay.factChecks.map((c) => c.note)).toEqual(["Newer.", "It is about 3.1 million."]);
+    overlay.dismissFact(overlay.factChecks[0]);
+    expect(overlay.factChecks.map((c) => c.note)).toEqual(["It is about 3.1 million."]);
+    overlay.endMeeting();
+    expect(overlay.factChecks).toEqual([]);
+  });
+
+  it("links only web sources, and names them by host", () => {
+    expect(sourceLink("https://www.a.example/x?y=1")).toEqual({ href: "https://www.a.example/x?y=1", host: "a.example" });
+    expect(sourceLink("javascript:alert(1)")).toBeNull();
+    expect(sourceLink("not a url")).toBeNull();
+  });
+});
+
+// Karim 2026-11-04, live: Meet's minimized self view (234x132 to 427x240) has no
+// room for a name above a face, so that tile uses Frame view by itself.
+describe("minimized tile", () => {
+  const withFace = (width: number) => {
+    const overlay = new Overlay(new FakeClock());
+    overlay.applyTiles({ tiles: [{ tile_id: "t", name: "Karim", is_self: true, rect: [0, 0, width, width * 0.5625], fit: "cover", video_w: 1280, video_h: 720, captions_rect: null }] } as never);
+    overlay.applyFaces({ tile_id: "t", frame_ts_ms: 0, engine: "sam", space: { frame_w: 1280, frame_h: 720 },
+      face: { box: [500, 200, 200, 200] } } as never);
+    return overlay;
+  };
+
+  it("uses Frame view on a small tile and Camera view on a normal one", () => {
+    expect(withFace(427).layout("t").mode).toBe("frame");
+    expect(withFace(234).layout("t").mode).toBe("frame");
+    expect(withFace(800).layout("t").mode).toBe("face");
+  });
+});
+
+// Karim 2026-11-04: each on-screen layer can be switched off from the badge menu.
+describe("show switches", () => {
+  it("names off drops the name pills, points off drops the bubbles", () => {
+    const { overlay } = make();
+    const root = new FakeEl();
+    overlay.applyPointsUpsert(point(), "env-1");
+    overlay.render(doc as never, root as never, 0);
+    expect(root.find((e) => e.classes.has("halo-name")).length).toBeGreaterThan(0);
+    overlay.show.names = false;
+    overlay.render(doc as never, root as never, 10);
+    expect(root.find((e) => e.classes.has("halo-name"))).toHaveLength(0);
+    expect(root.find((e) => e.attrs.has("data-point-id"))).toHaveLength(1);
+    overlay.show.points = false;
+    overlay.render(doc as never, root as never, 20);
+    expect(root.find((e) => e.attrs.has("data-point-id"))).toHaveLength(0);
+  });
+});

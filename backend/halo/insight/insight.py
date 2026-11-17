@@ -1,0 +1,352 @@
+"""Live insight: one model call per capped speaker turn batch, points upserted.
+
+On each `turn.attributed`, at most 1 call / 3 s / speaker and at most 30 RPM
+overall. Turns that hit a cap are held and coalesced into the next allowed
+call for their speaker (all of them as new words, every held `turn_id` on the
+point). Nothing bursts, nothing drops. `speaker.mapped.corrects[]` re-sends
+stored points with the same `point_id` and no model call. Emits `llm.health`
+on engine change, else at most every 30 s.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+import uuid
+from collections import deque
+from datetime import UTC, datetime
+from functools import partial
+from typing import Any
+
+log = logging.getLogger("halo.insight")
+
+Envelope = dict[str, Any]
+
+SPEAKER_WINDOW_S = 3.0
+# Live 2026-11-01: pauses cut sentences into scraps ("This is", "Is", "and
+# how") and each scrap became a point. A speaker's held words wait for at
+# least MIN_WORDS. Past that, a turn arriving IS the pause (the Transcriber
+# cuts only at a pause), so the call starts at once (2026-11-02: waiting for
+# a sentence end never fired, Voice partials carry no punctuation, so points
+# waited for 8 words or 6 s). A cut-off sentence comes back "none" and waits.
+MIN_WORDS = 3  # ponytail: a lone "Yes." never becomes a point; it rides with the next turn
+REHOLD_MAX_WORDS = 30  # an unfinished "none" waits for more words up to this size
+SENTENCE_END = (".", "?", "!", "؟")  # ؟ = Arabic question mark
+MAX_RPM = 30  # Karim 2026-11-01: 12 fit Baseten's basic tier, unused now; contributor allows 150
+RPM_WINDOW_S = 60.0
+HEALTH_INTERVAL_S = 30.0
+FLUSH_INTERVAL_S = 0.25
+PROMPT_CACHE_KEY = "insight-v3"
+
+# 2026-11-02: no model-written quote. The quote is the speaker's exact words
+# (always verbatim, #92), and a shorter reply plus shorter instructions cut
+# the contributor's median call from 3.96 s to 3.2 s (6 live calls each).
+POINT_RESULT_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        # "none": nothing worth a point (greeting, filler, mic check); never published.
+        "kind": {"type": "string", "enum": ["point", "question", "decision", "pushback", "none"]},
+        "text": {"type": "string"},
+        "rank": {"type": "integer", "minimum": 1, "maximum": 3},
+        "urgency": {"type": "string", "enum": ["urgent", "medium", "later"]},
+        "is_action": {"type": "boolean"},
+        "why": {"type": "string"},
+        "replaces": {"type": "string", "format": "uuid"},
+    },
+    "required": ["kind", "text", "rank", "urgency", "is_action"],
+    "additionalProperties": False,
+}
+
+INSTRUCTIONS = (
+    "Live meeting note. Reply with one JSON object for the new words below. "
+    "kind: point|question|decision|pushback, or none for filler, greetings, "
+    "mic checks, small talk, a sentence cut off before its point, or a fragment "
+    "that only reacts (looks good, it's okay) with no claim of its own, or a "
+    "remark on how someone talks (lower your tone, calm down, you're shouting); "
+    "never finish a fragment with words nobody said. pushback: an objection "
+    "to an idea, plan or claim. "
+    "text: the point as one short sentence (at most 12 words) with a capital "
+    "first letter, ending with a period (a question mark for a question), "
+    "in the viewer language. rank: 1-3 (1 = most important). "
+    "urgency: urgent only when the speaker calls it urgent, it is due today or "
+    "by tomorrow morning, it blocks other people, or it is a live risk to "
+    "customers or money; medium when it is needed soon; "
+    "later otherwise. why: only when urgent, 1-4 words on the deadline or "
+    "what it blocks (today, blocks signups). "
+    "is_action: true when someone takes on or is given a task with a result "
+    "(I will..., can you send..., X owns...); false for advice on behaviour "
+    "(lower your tone, calm down) and for remarks about the meeting. "
+    "replaces: only when this point supersedes an earlier point id. "
+    "Decide fast; do not deliberate."
+)
+
+
+class Insight:
+    """Critical-path live points. The model client is injected (duck-typed)."""
+
+    def __init__(
+        self,
+        bus: Any,
+        llm: Any,
+        *,
+        clock: Any = None,
+        speaker_window_s: float = SPEAKER_WINDOW_S,
+        max_rpm: int = MAX_RPM,
+        health_interval_s: float = HEALTH_INTERVAL_S,
+        flush_interval_s: float = FLUSH_INTERVAL_S,
+        min_words: int = MIN_WORDS,
+    ) -> None:
+        self._min_words = min_words
+        # Words a "none" sent back to wait: no new call until more arrive.
+        self._rehold_words: dict[tuple[str, str], int] = {}
+        self._bus = bus
+        self._llm = llm
+        self._clock = clock or time.monotonic
+        self._speaker_window = speaker_window_s
+        self._max_rpm = max_rpm
+        self._health_interval = health_interval_s
+        self._flush_interval = flush_interval_s
+        self._held: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        self._last_call: dict[tuple[str, str], float] = {}
+        self._call_times: deque[float] = deque()
+        self._inflight: set[tuple[str, str]] = set()
+        self._calls: set[asyncio.Task] = set()
+        self._contexts: dict[str, dict[str, Any]] = {}
+        self._points: dict[str, dict[str, dict[str, Any]]] = {}
+        self._turn_points: dict[tuple[str, str], list[str]] = {}
+        self._latencies: list[float] = []
+        self._last_health_engine: str | None = None
+        self._last_health_at = 0.0
+        self._task: asyncio.Task | None = None
+        bus.subscribe("turn.attributed", self._on_turn)
+        bus.subscribe("speaker.mapped", self._on_mapped)
+        bus.subscribe("meeting.context", self._on_context)
+
+    def health(self) -> dict[str, Any]:
+        """System-status shape; delegates to the injected model client."""
+        try:
+            current = self._llm.health()
+        except Exception:
+            log.exception("llm health callable failed")
+            current = None
+        if isinstance(current, dict) and isinstance(current.get("engine"), str):
+            return {"engine": current["engine"], "failover": bool(current.get("failover"))}
+        return {"engine": "unknown", "failover": False}
+
+    def start(self) -> None:
+        self._task = asyncio.get_running_loop().create_task(self._flush_loop())
+
+    def stop(self) -> None:
+        if self._task is not None:
+            self._task.cancel()
+            self._task = None
+        for call in list(self._calls):  # no point publishes after stop
+            call.cancel()
+
+    async def _flush_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self._flush_interval)
+            self._launch()  # never await the calls: one speaker's 4 s call must not hold another's
+
+    # -- inputs -----------------------------------------------------------
+
+    async def _on_turn(self, envelope: Envelope) -> None:
+        data = envelope.get("data")
+        meetingid = envelope.get("meetingid")
+        if not isinstance(data, dict) or not isinstance(meetingid, str):
+            return
+        key = (meetingid, str(data.get("name", "")))
+        # Never await the model here: bus.publish runs subscribers in turn, so a
+        # 4 s call would freeze the transcriber, the correlator and the gateway's
+        # ACKs (found live). The 250 ms flush loop picks the turn up.
+        self._held.setdefault(key, []).append(data)
+
+    async def _on_context(self, envelope: Envelope) -> None:
+        data = envelope.get("data")
+        meetingid = envelope.get("meetingid")
+        if isinstance(data, dict) and isinstance(meetingid, str):
+            self._contexts[meetingid] = data
+
+    async def _on_mapped(self, envelope: Envelope) -> None:
+        data = envelope.get("data")
+        meetingid = envelope.get("meetingid")
+        if not isinstance(data, dict) or not isinstance(meetingid, str):
+            return
+        corrects = data.get("corrects") or []
+        if not isinstance(corrects, list):
+            return
+        for turn_id in corrects:
+            for point_id in self._turn_points.get((meetingid, str(turn_id)), []):
+                stored = self._points.get(meetingid, {}).get(point_id)
+                if stored is None:
+                    continue
+                fixed = {
+                    **stored,
+                    "tile_id": data.get("tile_id", stored["tile_id"]),
+                    "speaker_name": data.get("name", stored["speaker_name"]),
+                    "attribution": "locked",
+                }
+                self._points[meetingid][point_id] = fixed
+                await self._bus.publish(self._envelope("points.upsert", fixed, meetingid))
+
+    # -- flushing ----------------------------------------------------------
+
+    async def flush(self) -> None:
+        """Start every allowed call and wait for them (tests; the loop uses _launch)."""
+        await asyncio.gather(*self._launch())
+
+    def _launch(self) -> list[asyncio.Task]:
+        """Start one call per speaker with held turns, in parallel (live
+        2026-11-01: one call at a time made a turn wait for another speaker's
+        call, then its own). A speaker with a call in flight keeps collecting
+        turns for its next call; the RPM cap counts calls as they start."""
+        pending = [(min(t.get("ts_start_ms", 0) for t in turns), key)
+                   for key, turns in self._held.items() if turns and key not in self._inflight]
+        started = []
+        for _, key in sorted(pending):
+            now = self._clock()
+            if not self._flushable(key, now):
+                continue
+            self._inflight.add(key)
+            self._call_times.append(now)
+            task = asyncio.get_running_loop().create_task(self._flush_speaker(key))
+            self._calls.add(task)  # the loop only holds tasks weakly
+            task.add_done_callback(partial(self._call_done, key))
+            started.append(task)
+        return started
+
+    def _call_done(self, key: tuple[str, str], task: asyncio.Task) -> None:
+        self._calls.discard(task)
+        self._inflight.discard(key)
+        if not task.cancelled() and task.exception() is not None:
+            log.error("insight call crashed", exc_info=task.exception())
+
+    def _flushable(self, key: tuple[str, str], now: float) -> bool:
+        text = " ".join(str(t.get("text", "")) for t in self._held.get(key, [])).strip()
+        words = len(text.split())
+        if words < self._min_words or words <= self._rehold_words.get(key, 0):
+            return False
+        if now - self._last_call.get(key, float("-inf")) < self._speaker_window:
+            return False
+        while self._call_times and self._call_times[0] <= now - RPM_WINDOW_S:
+            self._call_times.popleft()
+        return len(self._call_times) < self._max_rpm
+
+    async def _flush_speaker(self, key: tuple[str, str]) -> None:
+        meetingid, _ = key
+        turns = self._held.pop(key, [])
+        self._rehold_words.pop(key, None)
+        if not turns:
+            return
+        now = self._clock()
+        context = self._contexts.get(meetingid, {})
+        viewer_lang = context.get("viewer_lang", "en")
+        prompt = self.build_prompt(context, meetingid, str(turns[0].get("name", "")), turns)
+        start = self._clock()
+        try:
+            result = await asyncio.to_thread(
+                self._llm.complete_json,
+                prompt=prompt,
+                schema=POINT_RESULT_SCHEMA,
+                schema_name="insight.point",
+                prompt_cache_key=PROMPT_CACHE_KEY,
+            )
+        except Exception:
+            # The client returns typed failures; a raise is a bug there, but
+            # the turns still never drop (PLAN): re-queue like a failed call.
+            log.exception("insight call raised, %d turns re-queued", len(turns))
+            result = None
+        elapsed = self._clock() - start
+        if result is None or not result.ok or not isinstance(result.data, dict):
+            log.warning("insight call failed, %d turns re-queued", len(turns))
+            self._held[key] = turns + self._held.get(key, [])
+            self._last_call[key] = now
+            return
+        self._last_call[key] = now
+        self._latencies.append(elapsed)
+        del self._latencies[:-100]
+        if result.data["kind"] == "none":
+            text = " ".join(str(t.get("text", "")) for t in turns).strip()
+            if not text.endswith(SENTENCE_END) and len(text.split()) < REHOLD_MAX_WORDS:
+                # Cut off mid-sentence: the words wait for the rest of it.
+                self._held[key] = turns + self._held.get(key, [])
+                self._rehold_words[key] = len(text.split())
+            return  # filler: the turns are spent, no point
+        latest = turns[-1]
+        point: dict[str, Any] = {
+            "point_id": str(uuid.uuid4()),
+            "tile_id": latest.get("tile_id", ""),
+            "speaker_name": latest.get("name", ""),
+            "kind": result.data["kind"],
+            "text": result.data["text"],
+            "lang": viewer_lang,
+            "quote": " ".join(str(t.get("text", "")) for t in turns).strip(),
+            "turn_ids": [t["turn_id"] for t in turns],
+            "rank": result.data["rank"],
+            "attribution": latest.get("attribution", "provisional"),
+            "urgency": result.data["urgency"],
+            "is_action": result.data["is_action"],
+            "engine": result.engine,
+        }
+        why = str(result.data.get("why") or "").strip()
+        if point["urgency"] == "urgent" and why:
+            point["why"] = why[:40]
+        if result.data.get("replaces"):
+            point["replaces"] = result.data["replaces"]
+        self._points.setdefault(meetingid, {})[point["point_id"]] = point
+        for turn in turns:
+            self._turn_points.setdefault((meetingid, turn["turn_id"]), []).append(point["point_id"])
+        await self._bus.publish(self._envelope("points.upsert", point, meetingid))
+        await self._maybe_emit_health(result.engine)
+
+    # -- prompt + health ----------------------------------------------------
+
+    def build_prompt(
+        self,
+        context: dict[str, Any],
+        meetingid: str,
+        speaker: str,
+        turns: list[dict[str, Any]],
+    ) -> str:
+        viewer_lang = context.get("viewer_lang", "en")
+        lines = [INSTRUCTIONS]
+        subject = context.get("subject")
+        lines.append(f"Meeting: {subject or 'unspecified'} | Viewer language: {viewer_lang}")
+        if context.get("agenda"):
+            lines.append("Agenda: " + "; ".join(str(a) for a in context["agenda"]))
+        roles = context.get("roles") or []
+        if roles:
+            lines.append("Roles: " + ", ".join(
+                f"{r.get('name')} ({r.get('role')})" if r.get("role") else str(r.get("name"))
+                for r in roles if isinstance(r, dict)))
+        current = [p for p in self._points.get(meetingid, {}).values()
+                   if p.get("speaker_name") == speaker]
+        if current:
+            lines.append(f"{speaker}'s points so far:")
+            lines.extend(f"- [{p['kind']}] {p['text']}" for p in current)
+        lines.append(f"New words from {speaker}:")
+        lines.extend(f"- {t.get('text', '')}" for t in turns)
+        return "\n".join(lines)
+
+    async def _maybe_emit_health(self, engine: str) -> None:
+        now = self._clock()
+        if engine != self._last_health_engine or now - self._last_health_at >= self._health_interval:
+            self._last_health_engine = engine
+            self._last_health_at = now
+            latencies = sorted(self._latencies)
+            p90_ms = int(latencies[int(0.9 * (len(latencies) - 1))] * 1000) if latencies else 0
+            await self._bus.publish(self._envelope(
+                "llm.health", {"engine": engine, "p90_ms": p90_ms}, None))
+
+    def _envelope(self, type_: str, data: dict[str, Any], meetingid: str | None) -> Envelope:
+        return {
+            "specversion": "1.0",
+            "id": str(uuid.uuid4()),
+            "type": type_,
+            "source": "halo/insight",
+            "time": datetime.now(UTC).isoformat(),
+            "meetingid": meetingid,
+            "datacontenttype": "application/json",
+            "data": data,
+        }
