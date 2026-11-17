@@ -227,7 +227,7 @@ export interface NotesReady {
   people: NotesReadyPeople[];
   title?: string;
   summary?: string;
-  meeting_type?: "sprint" | "planning" | "discovery" | "sales" | "induction" | "one_on_one" | "interview" | "other";
+  meeting_type?: "employment" | "human_rights" | "education" | "immigration" | "other";
   disagreements?: NotesReadyDisagreements[];
 }
 

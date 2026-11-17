@@ -102,8 +102,7 @@
       archivedToast: "Archived. It left Needs action.", undo: "Undo",
       typeLabel: "Meeting type", typeByHalo: "sorted by Halo", typeByYou: "set by you",
       typeHalo: "Halo's pick", typePick: "Set a type",
-      t_sprint: "Sprint", t_planning: "Planning", t_discovery: "Product discovery", t_sales: "Sales",
-      t_induction: "Induction", t_one_on_one: "1:1", t_interview: "Interview", t_other: "Other",
+      t_employment: "Employment", t_human_rights: "Human rights", t_education: "Education", t_immigration: "Immigration", t_other: "Other",
       mailSubject: "Action item from \u201C{m}\u201D: {a}",
       mailBody: "Hi{o},\n\nFrom the meeting \u201C{m}\u201D ({d}):\n\n{a}\nUrgency: {u}\n\nSent from Halo",
       pointMailSubject: "From \u201C{m}\u201D: {p}",
@@ -196,8 +195,7 @@
       archivedToast: "تمت الأرشفة. خرج من «يحتاج إجراء».", undo: "تراجع",
       typeLabel: "نوع الاجتماع", typeByHalo: "رتّبه Halo", typeByYou: "حدّدته أنت",
       typeHalo: "اختيار Halo", typePick: "حدّد النوع",
-      t_sprint: "سبرنت", t_planning: "تخطيط", t_discovery: "استكشاف المنتج", t_sales: "مبيعات",
-      t_induction: "تهيئة موظف", t_one_on_one: "فردي", t_interview: "مقابلة", t_other: "أخرى",
+      t_employment: "العمل", t_human_rights: "حقوق الإنسان", t_education: "التعليم", t_immigration: "الهجرة", t_other: "أخرى",
       mailSubject: "مهمة من \u00AB{m}\u00BB: {a}",
       mailBody: "مرحباً{o}،\n\nمن اجتماع \u00AB{m}\u00BB ({d}):\n\n{a}\nالأولوية: {u}\n\nأُرسلت من Halo",
       pointMailSubject: "من \u00AB{m}\u00BB: {p}",
@@ -1309,7 +1307,7 @@
   // and coloured plates whose items jump to their mark. Tabs: All, Urgent,
   // Needs action, With others, folders, Archived; Halo's meeting types sort
   // underneath. "Since your last visit" counts what is new until Mark as seen.
-  var MTYPES = ["sprint", "planning", "discovery", "sales", "induction", "one_on_one", "interview", "other"];
+  var MTYPES = ["employment", "human_rights", "education", "immigration", "other"];
   var LAST_KEY = "halo-notes-lastvisit";
   var MODE_KEY = "halo-notes-view";
   var FOLD_KEY = "halo-notes-folded";
@@ -3070,7 +3068,7 @@
       ar: ["التبويبات والمشاريع", "«عاجل» و«يحتاج إجراء» و«مع آخرين» ترتب الاجتماعات حسب ما يحتاجك، ومشاريعك بجانبها، والمؤرشفة والمحذوفة في قائمة الأرشيف.",
       "تفرز حسب ما هو مفتوح، لا حسب التاريخ.",
       "يحدد المصنّف (Muse Spark) أولوية كل بند كل 10 ثوانٍ أثناء المكالمة، وتعديلك يتقدم دائماً. عند وضع «تم» على مهمة تخرج من هذه التبويبات، والمحذوف يبقى 30 يوماً."] },
-    { sel: ".types", en: ["Meeting types", "Halo sorts each meeting into a type: sprint, planning, product discovery and more.",
+    { sel: ".types", en: ["Meeting types", "Halo sorts each meeting by practice area: employment, human rights, education, immigration and more.",
       "You can filter a long list down to one kind of meeting.",
       "The Notes Builder labels the meeting when it ends. If you pick a different type, your choice is kept."],
       ar: ["أنواع الاجتماعات", "يصنّف هالو كل اجتماع: سبرنت، تخطيط، اكتشاف منتج وغيرها.",

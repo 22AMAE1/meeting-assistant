@@ -449,16 +449,16 @@ test("(H2) archive a meeting, then undo it", async ({ page }) => {
 });
 
 test("(H3) Halo sorts meetings by type; the user can set their own", async ({ page }) => {
-  home.type = "planning";
+  home.type = "employment";
   home.typeBy = "halo";
   await page.goto(baseURL + "/");
-  await expect(page.locator("#list .row .tchip")).toHaveText("Planning");
-  await expect(page.locator(".types [data-mtype=planning]")).toContainText("1");
+  await expect(page.locator("#list .row .tchip")).toHaveText("Employment");
+  await expect(page.locator(".types [data-mtype=employment]")).toContainText("1");
   await expect(page.locator("#preview .ptype")).toContainText("sorted by Halo");
-  await page.locator("#preview .mtype-set").selectOption("sales");
-  await expect(page.locator("#list .row .tchip")).toHaveText("Sales");
+  await page.locator("#preview .mtype-set").selectOption("immigration");
+  await expect(page.locator("#list .row .tchip")).toHaveText("Immigration");
   await expect(page.locator("#preview .ptype")).toContainText("set by you");
-  expect(home.posts.at(-1)).toEqual({ path: "/api/meetings/type", body: { meeting_id: MEETING_ID, meeting_type: "sales" } });
+  expect(home.posts.at(-1)).toEqual({ path: "/api/meetings/type", body: { meeting_id: MEETING_ID, meeting_type: "immigration" } });
 });
 
 test("(H4) since your last visit: new meetings and your action items until Mark as seen", async ({ page }) => {

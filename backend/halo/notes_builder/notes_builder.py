@@ -59,7 +59,7 @@ REBUILD_INSTRUCTIONS = (
 # and the meeting page. One extra Spark call at meeting end; a failure only
 # leaves them out.
 # Karim 2026-11-04: the notes list sorts meetings by type; same call, one more field.
-MEETING_TYPES = ("sprint", "planning", "discovery", "sales", "induction", "one_on_one", "interview", "other")
+MEETING_TYPES = ("employment", "human_rights", "education", "immigration", "other")
 
 SUMMARY_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -99,11 +99,8 @@ def summary_prompt(store: dict[str, Any]) -> str:
         "topic (at most 6 words), sides (each person's name and their view in "
         "at most 12 words), outcome settled (agreed in the meeting), parked "
         "(moved to later or offline) or open, resolution (what was agreed or "
-        "the next step, or empty). meeting_type: sprint (sprint review, "
-        "standup or retro), planning (roadmap, launch or scheduling), discovery "
-        "(product discovery or user research), sales (a customer or prospect "
-        "call), induction (onboarding someone new), one_on_one (two people "
-        "about work or growth), interview (hiring), or other. Use "
+        "the next step, or empty). meeting_type (the legal practice area): "
+        "employment (employment law in Ontario: dismissal, severance, ESA, contracts, workplace issues), human_rights (human rights: discrimination, harassment, accommodation, HRTO or OHRC matters), education (Ontario school and education law: suspensions, expulsions, special education, IEPs, school boards), immigration (Canadian immigration: IRCC, permits, Express Entry, sponsorship, refugee or IRB matters), or other. Use "
         "only what the transcript says. Write both in the language most of the "
         "meeting used.\n\n"
         f"Subject typed by the host: {store['meeting']['subject'] or 'none'}\n\n"

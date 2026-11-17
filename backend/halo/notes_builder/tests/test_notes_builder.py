@@ -69,7 +69,7 @@ class FakeLLM:
         self.timeouts: list = []
         self.summary_reply: dict | None = {"title": "Launch date moves to Nov 12",
                                            "summary": "Layla moved the launch to Nov 12.",
-                                           "meeting_type": "planning"}
+                                           "meeting_type": "employment"}
 
     def complete_json(self, *, prompt, schema, schema_name="notes.page",
                       system=None, prompt_cache_key=None, timeout_s=None):
@@ -360,7 +360,7 @@ def test_ai_title_and_summary_ride_on_notes_ready(tmp_path):
         assert validate_envelope(ready[0]) == []
         assert ready[0]["data"]["title"] == "Launch date moves to Nov 12"
         assert ready[0]["data"]["summary"] == "Layla moved the launch to Nov 12."
-        assert ready[0]["data"]["meeting_type"] == "planning"  # Karim 2026-11-04: auto-sort
+        assert ready[0]["data"]["meeting_type"] == "employment"  # Karim 2026-11-04: auto-sort
         assert len(llm.summary_calls) == 1
         assert ("notes.summary", 60.0) in llm.timeouts  # not the live 4 s budget
         assert "Layla: Launch moves to Nov 12." in llm.summary_calls[0]
