@@ -102,6 +102,7 @@
       archivedToast: "Archived. It left Needs action.", undo: "Undo",
       typeLabel: "Meeting type", typeByHalo: "sorted by Halo", typeByYou: "set by you",
       typeHalo: "Halo's pick", typePick: "Set a type",
+      clientLabel: "Client", matterLabel: "Matter", clientPh: "Client name", matterPh: "Matter no. or name",
       t_sprint: "Sprint", t_planning: "Planning", t_discovery: "Product discovery", t_sales: "Sales",
       t_induction: "Induction", t_one_on_one: "1:1", t_interview: "Interview", t_other: "Other",
       mailSubject: "Action item from \u201C{m}\u201D: {a}",
@@ -196,6 +197,7 @@
       archivedToast: "تمت الأرشفة. خرج من «يحتاج إجراء».", undo: "تراجع",
       typeLabel: "نوع الاجتماع", typeByHalo: "رتّبه Halo", typeByYou: "حدّدته أنت",
       typeHalo: "اختيار Halo", typePick: "حدّد النوع",
+      clientLabel: "العميل", matterLabel: "القضية", clientPh: "اسم العميل", matterPh: "رقم القضية أو اسمها",
       t_sprint: "سبرنت", t_planning: "تخطيط", t_discovery: "استكشاف المنتج", t_sales: "مبيعات",
       t_induction: "تهيئة موظف", t_one_on_one: "فردي", t_interview: "مقابلة", t_other: "أخرى",
       mailSubject: "مهمة من \u00AB{m}\u00BB: {a}",
@@ -1501,6 +1503,7 @@
     if (c.pushback) out.push(esc(t(lang, c.pushback > 1 ? "cPushes" : "cPush", { n: c.pushback })));
     if (c.urgent) out.push('<span class="urg-link" data-tab="urgent">' + esc(t(lang, c.urgent > 1 ? "cUrgs" : "cUrg", { n: c.urgent })) + "</span>");
     var h = out.join(" · ") || esc(t(lang, "noCapture"));
+    if (it.client || it.matter) h += '<span class="mchip" dir="auto">' + esc([it.client, it.matter].filter(Boolean).join(" · ")) + "</span>";
     if (it.meeting_type) h += '<span class="tchip" data-mt="' + esc(it.meeting_type) + '">' + esc(t(lang, "t_" + it.meeting_type)) + "</span>";
     if (it.archived) h += '<span class="arch-tag">' + esc(t(lang, "archivedTag")) + "</span>";
     if (it.deleted_at) h += '<span class="arch-tag">' + esc(t(lang, "purgeIn", { n: it.purge_in_days })) + "</span>";
@@ -1680,6 +1683,11 @@
       MTYPES.map(function (k) {
         return '<option value="' + k + '"' + (it.type_by === "you" && it.meeting_type === k ? " selected" : "") + ">" + esc(t(lang, "t_" + k)) + "</option>";
       }).join("") + "</select></label></div>";
+    h += '<div class="pmatter">' +
+      ["client", "matter"].map(function (k) {
+        return '<label><span class="sr">' + esc(t(lang, k + "Label")) + '</span><input class="matter-set" type="text" maxlength="200" data-field="' + k +
+          '" data-meeting="' + esc(m.id) + '" placeholder="' + esc(t(lang, k + "Ph")) + '" value="' + esc(it[k] || "") + '" dir="auto"></label>';
+      }).join("") + "</div>";
     if (m.duration) h += '<div class="timeline ' + app.homeMode + '"></div>' + keyHTML(lang) + '<div class="tip"></div>';
     h += '<div class="plates">' + platesHTML(m, lang) + "</div>";
     panel.innerHTML = h;
@@ -2946,6 +2954,13 @@
           var text = "# " + titleOf(past.meeting) + "\n\n" + (past.meeting.summary || "") + "\n\n" + exportMarkdown(past, app.lang);
           return setReference(titleOf(past.meeting) + ".md", text);
         }).catch(function () { toast(app, t(app.lang, "refFail")); });
+        return;
+      }
+      if (sel && sel.classList && sel.classList.contains("matter-set")) {
+        var box = sel.closest(".pmatter");
+        postJson("/api/meetings/matter", { meeting_id: sel.dataset.meeting,
+          client: box.querySelector('[data-field="client"]').value, matter: box.querySelector('[data-field="matter"]').value })
+          .then(refreshList).catch(function () { toast(app, t(app.lang, "notSaved")); });
         return;
       }
       if (sel && sel.classList && sel.classList.contains("mtype-set")) {

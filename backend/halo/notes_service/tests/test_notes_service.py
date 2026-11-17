@@ -166,7 +166,7 @@ def test_list_and_project_filter(tmp_path):
     assert meetings == [{"meeting_id": MEETING, "subject": "Launch readiness",
                          "people": ["Layla", "Omar"], "date": "Thu 09 Oct", "folder_id": None,
                          "t0_ms": T0, "minutes": 0,  # card facts (locked design)
-                         "archived": False, "meeting_type": None, "self_name": "Karim",
+                         "archived": False, "client": "", "matter": "", "meeting_type": None, "self_name": "Karim",
                          "counts": {"decision": 1, "question": 0, "pushback": 0, "urgent": 0, "open_actions": 1}}]
     assert client.get("/api/meetings", params={"project_id": "halo-q4"}).json() == meetings
     assert client.get("/api/meetings", params={"project_id": "other"}).json() == []
@@ -348,6 +348,25 @@ def test_meeting_type_from_the_builder_and_set_by_hand(tmp_path):
     assert client.get("/api/meetings").json()[0]["type_by"] == "halo"
 
 
+def test_client_and_matter_set_by_hand_and_cleared(tmp_path):
+    client, _, data = make_client(tmp_path)
+    item = client.get("/api/meetings").json()[0]
+    assert item["client"] == "" and item["matter"] == ""
+    body = {"meeting_id": MEETING, "client": "  Jane Doe ", "matter": "2026-014 Wrongful dismissal"}
+    assert client.post("/api/meetings/matter", json=body).status_code == 200
+    item = client.get("/api/meetings").json()[0]
+    assert (item["client"], item["matter"]) == ("Jane Doe", "2026-014 Wrongful dismissal")
+    from halo.notes_service.notes_service import NotesService
+    assert NotesService(Bus(), data_dir=data).list_meetings()[0]["client"] == "Jane Doe"  # survives a restart
+    for bad in ({"meeting_id": MEETING, "client": 5, "matter": ""}, {"meeting_id": MEETING, "client": "x" * 201, "matter": ""},
+                {"client": "a", "matter": "b"}):
+        assert client.post("/api/meetings/matter", json=bad).status_code == 400
+    assert client.post("/api/meetings/matter", json={"meeting_id": MEETING, "client": "", "matter": " "}).status_code == 200
+    item = client.get("/api/meetings").json()[0]
+    assert (item["client"], item["matter"]) == ("", "")
+    assert "matters" not in client.get("/api/meetings").json()[0]
+
+
 def test_meeting_without_a_type_has_none(tmp_path):
     client, _, _ = make_client(tmp_path)
     item = client.get("/api/meetings").json()[0]
@@ -360,7 +379,8 @@ def test_new_writes_refuse_other_sites(tmp_path):
     for path, body in [("/api/folders/rename", {"folder_id": "x", "name": "y"}),
                        ("/api/folders/delete", {"folder_id": "x"}),
                        ("/api/meetings/archive", {"meeting_id": MEETING, "archived": True}),
-                       ("/api/meetings/type", {"meeting_id": MEETING, "meeting_type": "sales"})]:
+                       ("/api/meetings/type", {"meeting_id": MEETING, "meeting_type": "sales"}),
+                       ("/api/meetings/matter", {"meeting_id": MEETING, "client": "a", "matter": "b"})]:
         assert client.post(path, json=body, headers=evil).status_code == 403, path
 
 

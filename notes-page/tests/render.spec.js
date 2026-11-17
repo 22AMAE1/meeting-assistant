@@ -47,7 +47,7 @@ const postedTags = [];
 const folders = { list: [], byMeeting: {} };
 const status = { meta_key: true };
 const audio = { status: 404, hits: 0 };
-const home = { archived: false, type: null, typeBy: null, urgent: 1, posts: [] };
+const home = { archived: false, type: null, typeBy: null, client: "", matter: "", urgent: 1, posts: [] };
 
 function send(res, status, body, type) {
   res.writeHead(status, { "Content-Type": type || "application/json" });
@@ -72,7 +72,7 @@ test.beforeAll(async () => {
           people: ["Layla"], date: "Tue 28 Oct", folder_id: folders.byMeeting[MEETING_ID] || null,
           t0_ms: GOLDEN.meeting.t0_ms, self_name: "Layla", minutes: 1,
           counts: { decision: 1, question: 0, pushback: 0, urgent: home.urgent },
-          archived: home.archived, meeting_type: home.type, ...(home.typeBy ? { type_by: home.typeBy } : {}),
+          archived: home.archived, client: home.client, matter: home.matter, meeting_type: home.type, ...(home.typeBy ? { type_by: home.typeBy } : {}),
           ...(home.deleted ? { deleted_at: "2026-11-04T20:00:00+00:00", purge_in_days: 30 } : {}) },
       ]));
     }
@@ -103,7 +103,7 @@ test.beforeAll(async () => {
         : [];
       return send(res, 200, JSON.stringify({ hits }));
     }
-    if (req.method === "POST" && ["/api/meetings/archive", "/api/meetings/delete", "/api/meetings/type", "/api/folders/rename",
+    if (req.method === "POST" && ["/api/meetings/archive", "/api/meetings/delete", "/api/meetings/type", "/api/meetings/matter", "/api/folders/rename",
       "/api/folders/delete", "/api/folders/move"].includes(url.pathname)) {
       let raw = "";
       req.on("data", (chunk) => { raw += chunk; });
@@ -112,6 +112,7 @@ test.beforeAll(async () => {
         home.posts.push({ path: url.pathname, body });
         if (url.pathname === "/api/meetings/archive") home.archived = body.archived;
         if (url.pathname === "/api/meetings/delete") home.deleted = body.deleted;
+        if (url.pathname === "/api/meetings/matter") { home.client = body.client; home.matter = body.matter; }
         if (url.pathname === "/api/meetings/type") { home.type = body.meeting_type; home.typeBy = body.meeting_type ? "you" : null; }
         if (url.pathname === "/api/folders/delete") {
           folders.list.splice(folders.list.findIndex((f) => f.folder_id === body.folder_id), 1);
@@ -186,7 +187,7 @@ test.beforeEach(async ({ page }) => {
   status.meta_key = true;
   audio.status = 404;
   audio.hits = 0;
-  Object.assign(home, { archived: false, deleted: false, type: null, typeBy: null, urgent: 1, posts: [] });
+  Object.assign(home, { archived: false, deleted: false, type: null, typeBy: null, client: "", matter: "", urgent: 1, posts: [] });
   folders.list.length = 0;
   for (const k of Object.keys(folders.byMeeting)) delete folders.byMeeting[k];
 });
@@ -446,6 +447,17 @@ test("(H2) archive a meeting, then undo it", async ({ page }) => {
   await page.locator("#toast .toast-undo").click();
   await expect(page.locator("#list .row .arch-tag")).toHaveCount(0);
   expect(home.posts.at(-1).body.archived).toBe(false);
+});
+
+test("(H3b) the user files a meeting under a client and a matter", async ({ page }) => {
+  await page.goto(baseURL + "/");
+  await page.locator('#preview .matter-set[data-field="client"]').fill("Jane Doe");
+  await page.locator('#preview .matter-set[data-field="matter"]').fill("2026-014 Wrongful dismissal");
+  await page.locator('#preview .matter-set[data-field="matter"]').blur();
+  expect(home.posts.at(-1)).toEqual({ path: "/api/meetings/matter",
+    body: { meeting_id: MEETING_ID, client: "Jane Doe", matter: "2026-014 Wrongful dismissal" } });
+  await expect(page.locator("#list .row .mchip")).toHaveText("Jane Doe · 2026-014 Wrongful dismissal");
+  await expect(page.locator('#preview .matter-set[data-field="client"]')).toHaveValue("Jane Doe");
 });
 
 test("(H3) Halo sorts meetings by type; the user can set their own", async ({ page }) => {
